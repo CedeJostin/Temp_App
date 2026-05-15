@@ -1,6 +1,7 @@
 from sqlalchemy import Column, String, DECIMAL, TIMESTAMP
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
+from sqlalchemy.orm import relationship  # ← agregar esta línea
 import uuid
 
 from app.db.database import Base
@@ -24,3 +25,5 @@ class Station(Base):
     institution = Column(String(100))
 
     created_at = Column(TIMESTAMP, server_default=func.now())
+
+    measurements = relationship("Measurement", back_populates="station")

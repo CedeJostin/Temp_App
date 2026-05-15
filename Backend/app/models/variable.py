@@ -1,6 +1,7 @@
 from sqlalchemy import Column, String, TIMESTAMP
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
+from sqlalchemy.orm import relationship  # ← agregar esta línea
 import uuid
 
 from app.db.database import Base
@@ -18,3 +19,5 @@ class Variable(Base):
     unit = Column(String(50), nullable=False)
 
     created_at = Column(TIMESTAMP, server_default=func.now())
+
+    measurements = relationship("Measurement", back_populates="variable") 
