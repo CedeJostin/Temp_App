@@ -25,18 +25,17 @@ def insert_measurements(
     """
     if df.empty:
         return 0
-
     records = [
-        {
-            "station_id":  uuid.UUID(station_id),
-            "variable_id": uuid.UUID(variable_id),
-            "file_id":     uuid.UUID(file_id),
-            "measured_at": row["measured_at"],
-            "value":       float(row["value"]),
-        }
-        for _, row in df.iterrows()
-        if pd.notna(row["value"])
-    ]
+    {
+        "station_id":  uuid.UUID(station_id),
+        "variable_id": uuid.UUID(variable_id),
+        "file_id":     uuid.UUID(file_id),
+        "measured_at": row["measured_at"],
+        "value":       float(row["value"]),
+    }
+    for _, row in df.iterrows()
+    if pd.notna(row["value"])
+]
 
     if not records:
         return 0

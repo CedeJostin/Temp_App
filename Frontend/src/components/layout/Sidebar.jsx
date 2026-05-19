@@ -1,59 +1,68 @@
-import { NavLink } from 'react-router-dom'
+import { NavLink } from "react-router-dom";
 import {
   LayoutDashboard,
-  Upload,
   BarChart2,
-  CloudRain,
-  Sun,
-  Moon
-} from 'lucide-react'
+  Upload,
+  MapPin,
+  Activity,
+  Menu,
+  X,
+} from "lucide-react";
+import { useState } from "react";
 
-const navItems = [
-  { to: '/',        icon: LayoutDashboard, label: 'Dashboard'  },
-  { to: '/upload',  icon: Upload,          label: 'Cargar datos' },
-  { to: '/analysis',icon: BarChart2,       label: 'Análisis'   },
-]
+const links = [
+  { to: "/",          label: "Dashboard",    icon: LayoutDashboard },
+  { to: "/analysis",  label: "Análisis",     icon: BarChart2       },
+  { to: "/upload",    label: "Cargar datos", icon: Upload          },
+  { to: "/stations",  label: "Estaciones",   icon: MapPin          },
+  { to: "/measurements", label: "Mediciones", icon: Activity       },
+];
 
-export default function Sidebar({ darkMode, toggleDark }) {
+export default function Sidebar() {
+  const [open, setOpen] = useState(false);
+
   return (
-    <aside className="flex flex-col w-60 min-h-screen border-r border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-4 py-6 shrink-0">
-
-      {/* Logo */}
-      <div className="flex items-center gap-2 mb-10 px-2">
-        <CloudRain className="text-blue-500" size={22} />
-        <span className="font-semibold text-gray-800 dark:text-gray-100 tracking-tight">
-          MeteoUNED
-        </span>
-      </div>
-
-      {/* Nav */}
-      <nav className="flex flex-col gap-1 flex-1">
-        {navItems.map(({ to, icon: Icon, label }) => (
-          <NavLink
-            key={to}
-            to={to}
-            end={to === '/'}
-            className={({ isActive }) =>
-              `flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors
-              ${isActive
-                ? 'bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 font-medium'
-                : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'}`
-            }
-          >
-            <Icon size={18} />
-            {label}
-          </NavLink>
-        ))}
-      </nav>
-
-      {/* Toggle dark mode */}
+    <>
+      {/* Mobile toggle */}
       <button
-        onClick={toggleDark}
-        className="flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors mt-4"
+        className="sidebar-mobile-toggle"
+        onClick={() => setOpen(!open)}
+        aria-label="Toggle sidebar"
       >
-        {darkMode ? <Sun size={18} /> : <Moon size={18} />}
-        {darkMode ? 'Modo claro' : 'Modo oscuro'}
+        {open ? <X size={20} /> : <Menu size={20} />}
       </button>
-    </aside>
-  )
+
+      <aside className={`sidebar ${open ? "sidebar--open" : ""}`}>
+        <div className="sidebar__brand">
+          <span className="sidebar__brand-icon">🌿</span>
+          <span className="sidebar__brand-name">EcoSensor</span>
+        </div>
+
+        <nav className="sidebar__nav">
+          {links.map(({ to, label, icon: Icon }) => (
+            <NavLink
+              key={to}
+              to={to}
+              end={to === "/"}
+              className={({ isActive }) =>
+                `sidebar__link ${isActive ? "sidebar__link--active" : ""}`
+              }
+              onClick={() => setOpen(false)}
+            >
+              <Icon size={18} />
+              <span>{label}</span>
+            </NavLink>
+          ))}
+        </nav>
+
+        <div className="sidebar__footer">
+          <span>API: {import.meta.env.VITE_API_URL || "localhost:8000"}</span>
+        </div>
+      </aside>
+
+      {open && (
+        <div className="sidebar-overlay" onClick={() => setOpen(false)} />
+      )}
+    </>
+  );
 }

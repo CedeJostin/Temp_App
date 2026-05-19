@@ -1,14 +1,14 @@
 """
 file_parser.py
 ==============
-Convierte archivos CSV y Excel meteorológicos (formato ancho horario)
-a un DataFrame normalizado con columnas:
+Convierte archivos CSV y Excel meteorológicos a un DataFrame normalizado con columnas:
     measured_at  (datetime)
     value        (float)
 
 Soporta:
   - Formato A: encabezado en fila 0,  columnas H1…H24
   - Formato B: encabezado en fila 1,  columnas 01:00…24:00
+  - Formato L: formato largo (Fecha | Hora | ... | Valor)
   - Archivos Excel con múltiples hojas
 """
 
@@ -125,8 +125,90 @@ def _detect_variable(text: str, filename: str = "") -> str:
     if "temperatura" in t or "temp" in t:            return "Temperatura"
     if "humedad" in t or "hum" in t:                 return "Humedad"
     if "radiaci" in t or "mj" in t or "rad" in t:   return "Radiacion"
-    if "viento" in t or "velocidad" in t:            return "Viento"
+    if "viento" in t or "velocidad" in t or "vel" in t: return "Viento"
     return "UNKNOWN"
+
+
+def _parse_long_format(
+    df: pd.DataFrame,
+    filename: str,
+    logs: list[str],
+) -> tuple[pd.DataFrame, str, list[str]]:
+    """
+    Maneja CSVs con formato largo: columna Fecha + columna Hora + columna de valor.
+    Ej: Fecha | Hora | Dirección | Velocidad (m/s) | ...
+    """
+    col_map = {_norm(str(c)): c for c in df.columns}
+
+    # Detectar columna de fecha y hora
+    fecha_col = next((col_map[k] for k in col_map
+                      if k in ["fecha", "date", "f"]), None)
+    hora_col  = next((col_map[k] for k in col_map
+                      if k in ["hora", "hour", "time", "tiempo"]), None)
+
+    if not fecha_col or not hora_col:
+        logs.append(f"⚠️ {filename}: no se encontraron columnas Fecha/Hora")
+        return pd.DataFrame(), "UNKNOWN", logs
+
+    # Detectar variable y columna de valor
+    vtype = _detect_variable("", filename)
+    value_col = None
+
+    PRIORITY = [
+        (["velocidad", "vel", "speed"],         "Viento"),
+        (["temperatura", "temp"],               "Temperatura"),
+        (["humedad", "hum", "humidity"],        "Humedad"),
+        (["radiaci", "rad", "mj", "radiation"], "Radiacion"),
+    ]
+
+    for keywords, detected_vtype in PRIORITY:
+        for c in df.columns:
+            cn = _norm(str(c))
+            if any(kw in cn for kw in keywords):
+                value_col = c
+                if vtype == "UNKNOWN":
+                    vtype = detected_vtype
+                break
+        if value_col:
+            break
+
+    if not value_col:
+        logs.append(f"⚠️ {filename}: no se detectó columna de valor")
+        return pd.DataFrame(), vtype, logs
+
+    # Construir measured_at combinando Fecha + Hora
+    try:
+        fecha_str = df[fecha_col].astype(str).str.strip()
+        hora_str  = df[hora_col].astype(str).str.strip()
+        measured_at = pd.to_datetime(
+            fecha_str + " " + hora_str,
+            dayfirst=True, errors="coerce"
+        )
+    except Exception as e:
+        logs.append(f"⚠️ {filename}: error parseando fechas: {e}")
+        return pd.DataFrame(), vtype, logs
+
+    result = pd.DataFrame({
+        "measured_at": measured_at,
+        "value": _to_float(df[value_col]),
+    }).dropna().sort_values("measured_at").reset_index(drop=True)
+
+    if result.empty:
+        logs.append(f"⚠️ {filename}: formato largo detectado pero sin datos válidos")
+        return pd.DataFrame(), vtype, logs
+
+    logs.append(f"✅ {filename} → {vtype} ({len(result):,} registros, formato largo)")
+    return result, vtype, logs
+
+
+def _try_read_csv(file_bytes: bytes, enc: str, sep: str, header: int) -> pd.DataFrame:
+    try:
+        return pd.read_csv(
+            io.BytesIO(file_bytes), sep=sep,
+            encoding=enc, header=header, decimal=","
+        )
+    except Exception:
+        return pd.DataFrame()
 
 
 # ── API pública ───────────────────────────────────────────────────────
@@ -163,7 +245,7 @@ def _parse_csv(
 
     for enc in ["latin1", "utf-8", "cp1252"]:
         try:
-            # Leer fila 0 para detectar tipo
+            # Leer fila 0 para detectar tipo de variable
             row0 = pd.read_csv(
                 io.BytesIO(file_bytes), sep=";", encoding=enc,
                 header=None, nrows=1
@@ -171,23 +253,33 @@ def _parse_csv(
             row0_text = " ".join(str(v) for v in row0.iloc[0].values if pd.notna(v))
             vtype = _detect_variable(row0_text, filename)
 
-            # Intentar con header=1 (formato B) y header=0 (formato A)
-            df_b = pd.read_csv(io.BytesIO(file_bytes), sep=";",
-                               encoding=enc, header=1, decimal=",")
-            _, fmt_b = _detect_hour_cols(df_b)
+            # ── Intentar formatos anchos (A y B) ─────────────────
+            df_b = _try_read_csv(file_bytes, enc, ";", 1)
+            _, fmt_b = _detect_hour_cols(df_b) if not df_b.empty else ([], "UNKNOWN")
 
-            df_a = pd.read_csv(io.BytesIO(file_bytes), sep=";",
-                               encoding=enc, header=0, decimal=",")
-            _, fmt_a = _detect_hour_cols(df_a)
+            df_a = _try_read_csv(file_bytes, enc, ";", 0)
+            _, fmt_a = _detect_hour_cols(df_a) if not df_a.empty else ([], "UNKNOWN")
 
-            if fmt_b in ("A","B"):
+            if fmt_b in ("A", "B"):
                 df_use = df_b
-            elif fmt_a in ("A","B"):
+            elif fmt_a in ("A", "B"):
                 df_use = df_a
                 if vtype == "UNKNOWN":
                     vtype = _detect_variable(
                         " ".join(str(c) for c in df_a.columns), filename)
             else:
+                # ── Fallback: intentar formato largo ─────────────
+                # Probar separador ";" primero, luego ","
+                for sep in [";", ","]:
+                    df_long = _try_read_csv(file_bytes, enc, sep, 0)
+                    if df_long.empty or len(df_long.columns) <= 1:
+                        continue
+                    result, vtype, long_logs = _parse_long_format(df_long, filename, [])
+                    logs.extend(long_logs)
+                    if not result.empty:
+                        result["measured_at"] = result["measured_at"].dt.round("h")
+                        return result, vtype, logs
+
                 logs.append(f"⚠️ {filename}: no se detectaron columnas horarias")
                 return pd.DataFrame(), "UNKNOWN", logs
 
@@ -231,15 +323,23 @@ def _parse_excel(
             df_a = xl.parse(sname, header=0).dropna(how="all").reset_index(drop=True)
             _, fmt_a = _detect_hour_cols(df_a)
 
-            if fmt_b in ("A","B"):
+            if fmt_b in ("A", "B"):
                 df_use = df_b
-            elif fmt_a in ("A","B"):
+            elif fmt_a in ("A", "B"):
                 df_use = df_a
                 if vtype == "UNKNOWN":
                     vtype = _detect_variable(
                         " ".join(str(c) for c in df_a.columns), sname)
             else:
-                logs.append(f"⚠️ Hoja '{sname}': no se detectaron columnas horarias")
+                # Fallback: formato largo en Excel
+                result, vtype, long_logs = _parse_long_format(df_a, sname, [])
+                logs.extend(long_logs)
+                if not result.empty:
+                    result["measured_at"] = result["measured_at"].dt.round("h")
+                    all_frames.append(result)
+                    vtype_detected = vtype
+                else:
+                    logs.append(f"⚠️ Hoja '{sname}': no se detectaron columnas horarias")
                 continue
 
             parsed = _wide_to_long(df_use, vtype)

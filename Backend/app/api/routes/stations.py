@@ -8,6 +8,20 @@ from app.schemas.station import StationCreate, StationResponse
 
 router = APIRouter()
 
+# ── Variables ─────────────────────────────────────────────────────────
+
+@router.get("/variables/all")
+def get_variables(db: Session = Depends(get_db)):
+    variables = db.query(Variable).order_by(Variable.code).all()
+    return [
+        {
+            "id":   str(v.id),
+            "code": v.code,
+            "name": v.name,
+            "unit": v.unit,
+        }
+        for v in variables
+    ]
 
 # ── Estaciones ────────────────────────────────────────────────────────
 
@@ -52,17 +66,3 @@ def get_station(station_id: str, db: Session = Depends(get_db)):
     return station
 
 
-# ── Variables ─────────────────────────────────────────────────────────
-
-@router.get("/variables/all")
-def get_variables(db: Session = Depends(get_db)):
-    variables = db.query(Variable).order_by(Variable.code).all()
-    return [
-        {
-            "id":   str(v.id),
-            "code": v.code,
-            "name": v.name,
-            "unit": v.unit,
-        }
-        for v in variables
-    ]

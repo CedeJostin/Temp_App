@@ -1,213 +1,215 @@
-import { useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useState, useEffect } from "react";
 import {
-  CloudRain, Thermometer, Droplets, AlertTriangle,
-  CheckCircle, Clock, TrendingUp, MapPin, Loader2
-} from 'lucide-react'
-import api from '../services/api'
+  LineChart, Line, AreaChart, Area,
+  XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
+} from "recharts";
+import { Thermometer, Droplets, Zap, Wind, TrendingUp } from "lucide-react";
+import { stationsApi, measurementsApi } from "../services/api";
+import { Spinner, Alert, StatCard, Select, Card, Badge } from "../components/ui";
 
-const completitudColor = (val) => {
-  if (val >= 98) return 'bg-green-500'
-  if (val >= 95) return 'bg-blue-500'
-  if (val >= 90) return 'bg-yellow-400'
-  if (val >= 85) return 'bg-orange-400'
-  return 'bg-red-500'
-}
+const VAR_META = {
+  TEMP:   { label: "Temperatura", unit: "°C",  color: "#ef4444", icon: <Thermometer size={22} /> },
+  HR:     { label: "Humedad",     unit: "%",   color: "#3b82f6", icon: <Droplets size={22} />    },
+  RAD:    { label: "Radiación",   unit: "W/m²",color: "#f59e0b", icon: <Zap size={22} />         },
+  VIENTO: { label: "Viento",     unit: "m/s", color: "#10b981", icon: <Wind size={22} />         },
+};
 
-const completitudBadge = (val) => {
-  if (val >= 98) return 'bg-green-50 text-green-700 dark:bg-green-900/30 dark:text-green-400'
-  if (val >= 95) return 'bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400'
-  if (val >= 90) return 'bg-yellow-50 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-500'
-  if (val >= 85) return 'bg-orange-50 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400'
-  return 'bg-red-50 text-red-700 dark:bg-red-900/30 dark:text-red-400'
-}
+const PERIOD_OPTS = [
+  { value: "hour", label: "Por hora" },
+  { value: "day",  label: "Por día"  },
+  { value: "month",label: "Por mes"  },
+];
 
-const estadoDeCompletitud = (val) => {
-  if (val >= 90) return 'bueno'
-  if (val >= 75) return 'regular'
-  return 'malo'
-}
-
-const estadoIcon = (estado) => {
-  if (estado === 'bueno')   return <CheckCircle size={15} className="text-green-500" />
-  if (estado === 'regular') return <Clock size={15} className="text-yellow-500" />
-  return <AlertTriangle size={15} className="text-red-500" />
+function fmt(str) {
+  if (!str) return "";
+  const d = new Date(str);
+  return isNaN(d) ? str : d.toLocaleDateString("es-CR", { day: "2-digit", month: "short" });
 }
 
 export default function Dashboard() {
-  const [filtro, setFiltro] = useState('todas')
+  const [stations, setStations]   = useState([]);
+  const [stationId, setStationId] = useState("");
+  const [summary, setSummary]     = useState([]);
+  const [charts, setCharts]       = useState({});
+  const [groupBy, setGroupBy]     = useState("day");
+  const [loading, setLoading]     = useState(false);
+  const [error, setError]         = useState(null);
 
-  const { data, isLoading, isError } = useQuery({
-    queryKey: ['estaciones'],
-    queryFn: async () => {
-      const res = await api.get('/estaciones/')
-      return res.data.data
-    },
-  })
+  // Load stations
+  useEffect(() => {
+    stationsApi.getAll().then(setStations).catch(() => {});
+  }, []);
 
-  const estaciones = (data || []).map(e => ({
-    ...e,
-    completitud: e.completitud ?? Math.round(85 + Math.random() * 15),
-  }))
+  // Auto-select first station
+  useEffect(() => {
+    if (stations.length && !stationId) setStationId(stations[0].id);
+  }, [stations]);
 
-  const filtradas = estaciones.filter(e => {
-    if (filtro === 'todas') return true
-    return estadoDeCompletitud(e.completitud) === filtro
-  })
+  // Load data when station or groupBy changes
+  useEffect(() => {
+    if (!stationId) return;
+    setLoading(true);
+    setError(null);
 
-  const resumen = [
-    {
-      label: 'Estaciones activas',
-      value: estaciones.length.toString(),
-      sub: 'cargadas desde la API',
-      icon: MapPin,
-      color: 'text-blue-500',
-    },
-    {
-      label: 'Altura promedio',
-      value: estaciones.length
-        ? `${Math.round(estaciones.reduce((a, e) => a + (e.altura || 0), 0) / estaciones.length)} m`
-        : '—',
-      sub: 'sobre el nivel del mar',
-      icon: TrendingUp,
-      color: 'text-green-500',
-    },
-    {
-      label: 'Temp. referencia',
-      value: '20.3°C',
-      sub: 'promedio estimado GAM',
-      icon: Thermometer,
-      color: 'text-orange-400',
-    },
-    {
-      label: 'HR referencia',
-      value: '80.7%',
-      sub: 'promedio estimado GAM',
-      icon: Droplets,
-      color: 'text-blue-400',
-    },
-  ]
+    Promise.all([
+      measurementsApi.summary({ station_id: stationId }),
+      ...Object.keys(VAR_META).map((code) =>
+        measurementsApi
+          .byDate({ station_id: stationId, variable_code: code, group_by: groupBy })
+          .then((data) => ({ code, data }))
+          .catch(() => ({ code, data: [] }))
+      ),
+    ])
+      .then(([summaryData, ...chartResults]) => {
+        setSummary(summaryData);
+        const map = {};
+        chartResults.forEach(({ code, data }) => { map[code] = data; });
+        setCharts(map);
+      })
+      .catch((e) => setError(e.message))
+      .finally(() => setLoading(false));
+  }, [stationId, groupBy]);
+
+  const stationOpts = stations.map((s) => ({ value: s.id, label: s.name }));
 
   return (
-    <div>
-      {/* Header */}
-      <div className="mb-8">
-        <div className="flex items-center gap-2 mb-1">
-          <CloudRain size={22} className="text-blue-500" />
-          <h1 className="text-2xl font-semibold text-gray-800 dark:text-gray-100">Dashboard</h1>
+    <div className="page">
+      <header className="page__header">
+        <div>
+          <h1 className="page__title">Dashboard</h1>
+          <p className="page__subtitle">Resumen de mediciones ambientales</p>
         </div>
-        <p className="text-sm text-gray-500 dark:text-gray-400">
-          Estado general de las estaciones meteorológicas del GAM
-        </p>
-      </div>
+        <div className="page__controls">
+          <Select
+            label="Estación"
+            value={stationId}
+            onChange={setStationId}
+            options={stationOpts}
+            placeholder="Seleccionar..."
+          />
+          <Select
+            label="Agrupación"
+            value={groupBy}
+            onChange={setGroupBy}
+            options={PERIOD_OPTS}
+          />
+        </div>
+      </header>
 
-      {/* Tarjetas resumen */}
-      <div className="grid grid-cols-2 xl:grid-cols-4 gap-4 mb-8">
-        {resumen.map(({ label, value, sub, icon: Icon, color }) => (
-          <div key={label} className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl p-5">
-            <div className="flex items-center justify-between mb-3">
-              <span className="text-xs text-gray-500 dark:text-gray-400">{label}</span>
-              <Icon size={18} className={color} />
-            </div>
-            <div className="text-2xl font-semibold text-gray-800 dark:text-gray-100">{value}</div>
-            <div className="text-xs text-gray-400 dark:text-gray-500 mt-1">{sub}</div>
+      {error && <Alert>{error}</Alert>}
+      {loading && <Spinner />}
+
+      {!loading && (
+        <>
+          {/* ── Summary stats ───────────────────────────────── */}
+          <section className="stats-grid">
+            {Object.entries(VAR_META).map(([code, meta]) => {
+              const row = summary.find((s) => s.variable_code === code);
+              return (
+                <StatCard
+                  key={code}
+                  label={meta.label}
+                  value={row ? row.avg.toFixed(2) : null}
+                  unit={meta.unit}
+                  icon={meta.icon}
+                  color={meta.color}
+                />
+              );
+            })}
+          </section>
+
+          {/* ── Charts ──────────────────────────────────────── */}
+          <div className="charts-grid">
+            {Object.entries(VAR_META).map(([code, meta]) => {
+              const data = charts[code] || [];
+              return (
+                <Card key={code} className="chart-card">
+                  <div className="chart-card__header">
+                    <span style={{ color: meta.color }}>{meta.icon}</span>
+                    <h3>{meta.label}</h3>
+                    <Badge label={meta.unit} color={meta.color} />
+                  </div>
+                  {data.length === 0 ? (
+                    <p className="empty-hint">Sin datos para esta estación</p>
+                  ) : (
+                    <ResponsiveContainer width="100%" height={220}>
+                      <AreaChart data={data} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
+                        <defs>
+                          <linearGradient id={`grad-${code}`} x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="5%"  stopColor={meta.color} stopOpacity={0.3} />
+                            <stop offset="95%" stopColor={meta.color} stopOpacity={0}   />
+                          </linearGradient>
+                        </defs>
+                        <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                        <XAxis
+                          dataKey="period"
+                          tickFormatter={fmt}
+                          tick={{ fontSize: 11, fill: "var(--text-muted)" }}
+                          interval="preserveStartEnd"
+                        />
+                        <YAxis tick={{ fontSize: 11, fill: "var(--text-muted)" }} />
+                        <Tooltip
+                          formatter={(v) => [`${v.toFixed(2)} ${meta.unit}`, "Promedio"]}
+                          labelFormatter={fmt}
+                          contentStyle={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8 }}
+                        />
+                        <Area
+                          type="monotone"
+                          dataKey="avg"
+                          stroke={meta.color}
+                          strokeWidth={2}
+                          fill={`url(#grad-${code})`}
+                          dot={false}
+                        />
+                      </AreaChart>
+                    </ResponsiveContainer>
+                  )}
+                </Card>
+              );
+            })}
           </div>
-        ))}
-      </div>
 
-      {/* Filtros */}
-      <div className="flex items-center justify-between mb-4">
-        <h2 className="text-base font-medium text-gray-700 dark:text-gray-300">Estaciones</h2>
-        <div className="flex gap-2">
-          {['todas', 'bueno', 'regular', 'malo'].map(f => (
-            <button
-              key={f}
-              onClick={() => setFiltro(f)}
-              className={`text-xs px-3 py-1.5 rounded-lg border transition-colors capitalize
-                ${filtro === f
-                  ? 'bg-blue-500 text-white border-blue-500'
-                  : 'bg-white dark:bg-gray-900 text-gray-600 dark:text-gray-400 border-gray-200 dark:border-gray-700 hover:border-blue-300'
-                }`}
-            >
-              {f}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Estados de carga */}
-      {isLoading && (
-        <div className="flex items-center justify-center gap-2 py-16 text-gray-400">
-          <Loader2 size={20} className="animate-spin" />
-          <span className="text-sm">Cargando estaciones...</span>
-        </div>
-      )}
-
-      {isError && (
-        <div className="flex items-center gap-2 bg-red-50 dark:bg-red-900/20 border border-red-100 dark:border-red-800 rounded-xl px-5 py-4 text-sm text-red-600 dark:text-red-400">
-          <AlertTriangle size={16} />
-          No se pudo conectar con el backend. Verificá que FastAPI esté corriendo en localhost:8000.
-        </div>
-      )}
-
-      {/* Tabla */}
-      {!isLoading && !isError && (
-        <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl overflow-hidden">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-gray-100 dark:border-gray-800">
-                {['Estación', 'Código', 'Altura', 'Coordenadas', 'Completitud', 'Estado'].map(h => (
-                  <th key={h} className="text-left px-5 py-3 text-xs font-medium text-gray-500 dark:text-gray-400">
-                    {h}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {filtradas.map((e, i) => {
-                const estado = estadoDeCompletitud(e.completitud)
-                return (
-                  <tr key={e.id}
-                    className={`border-b border-gray-50 dark:border-gray-800 last:border-0
-                      hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors
-                      ${i % 2 === 0 ? '' : 'bg-gray-50/50 dark:bg-gray-800/20'}`}
-                  >
-                    <td className="px-5 py-3.5 font-medium text-gray-800 dark:text-gray-200">{e.nombre}</td>
-                    <td className="px-5 py-3.5 text-gray-500 dark:text-gray-400 font-mono text-xs">{e.codigo}</td>
-                    <td className="px-5 py-3.5 text-gray-600 dark:text-gray-400">{e.altura} m</td>
-                    <td className="px-5 py-3.5 text-gray-400 dark:text-gray-500 font-mono text-xs">{e.coords}</td>
-                    <td className="px-5 py-3.5">
-                      <div className="flex items-center gap-2">
-                        <div className="w-20 h-1.5 bg-gray-100 dark:bg-gray-700 rounded-full overflow-hidden">
-                          <div
-                            className={`h-full rounded-full ${completitudColor(e.completitud)}`}
-                            style={{ width: `${e.completitud}%` }}
-                          />
-                        </div>
-                        <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${completitudBadge(e.completitud)}`}>
-                          {e.completitud}%
-                        </span>
-                      </div>
-                    </td>
-                    <td className="px-5 py-3.5">
-                      <span className="flex items-center gap-1.5 text-gray-600 dark:text-gray-400 capitalize">
-                        {estadoIcon(estado)}{estado}
-                      </span>
-                    </td>
-                  </tr>
-                )
-              })}
-              {filtradas.length === 0 && (
-                <tr>
-                  <td colSpan={6} className="px-5 py-10 text-center text-sm text-gray-400">
-                    No hay estaciones con ese filtro.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
+          {/* ── Summary table ───────────────────────────────── */}
+          {summary.length > 0 && (
+            <Card>
+              <h3 style={{ marginBottom: "1rem" }}>
+                <TrendingUp size={16} style={{ marginRight: 6 }} />
+                Estadísticas detalladas
+              </h3>
+              <div className="table-wrap">
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th>Variable</th><th>Min</th><th>Máx</th>
+                      <th>Promedio</th><th>Registros</th><th>Período</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {summary.map((row) => {
+                      const meta = VAR_META[row.variable_code] || {};
+                      return (
+                        <tr key={row.variable_code}>
+                          <td>
+                            <span style={{ color: meta.color, marginRight: 6 }}>{meta.icon}</span>
+                            {row.variable_name}
+                          </td>
+                          <td>{row.min?.toFixed(2)} {row.unit}</td>
+                          <td>{row.max?.toFixed(2)} {row.unit}</td>
+                          <td><strong>{row.avg?.toFixed(2)} {row.unit}</strong></td>
+                          <td>{row.count?.toLocaleString()}</td>
+                          <td style={{ fontSize: "0.75rem", opacity: 0.7 }}>
+                            {fmt(row.date_start)} → {fmt(row.date_end)}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </Card>
+          )}
+        </>
       )}
     </div>
-  )
+  );
 }
