@@ -1,198 +1,297 @@
-import { useState, useEffect, useRef } from "react";
-import { UploadCloud, CheckCircle, XCircle, Clock, FileText } from "lucide-react";
-import { stationsApi, uploadsApi } from "../services/api";
-import { Spinner, Alert, Select, Card, Button, Badge } from "../components/ui";
+import { useState, useRef } from "react"
+import { useFetch } from "../hooks/useFetch"
+import { stationsApi, uploadsApi } from "../services/api"
 
-const STATUS_ICON = {
-  processed:  <CheckCircle size={16} color="#10b981" />,
-  processing: <Clock       size={16} color="#f59e0b" />,
-  error:      <XCircle     size={16} color="#ef4444" />,
-};
+const VARIABLES = [
+  { key: "temperatura", code: "TEMP",   label: "Temperatura",     icon: "🌡️", color: "#ef4444", border: "#ef444440" },
+  { key: "humedad",     code: "HR",     label: "Humedad Relativa", icon: "💧", color: "#3b82f6", border: "#3b82f640" },
+  { key: "viento",      code: "VIENTO", label: "Viento",           icon: "💨", color: "#22c55e", border: "#22c55e40" },
+]
 
-export default function Upload() {
-  const [stations, setStations]   = useState([]);
-  const [variables, setVariables] = useState([]);
-  const [stationId, setStationId] = useState("");
-  const [varId, setVarId]         = useState("");
-  const [file, setFile]           = useState(null);
-  const [dragging, setDragging]   = useState(false);
-  const [uploading, setUploading] = useState(false);
-  const [result, setResult]       = useState(null);
-  const [error, setError]         = useState(null);
-  const [history, setHistory]     = useState([]);
-  const [histLoading, setHistLoading] = useState(true);
-  const inputRef = useRef();
+const parsearCSV = (texto) => {
+  const lineas = texto.trim().split("\n").filter(Boolean)
+  const sep = lineas[0].includes(";") ? ";" : ","
+  const columnas = lineas[0].split(sep).map(c => c.trim().replace(/^\uFEFF/, ""))
+  const colsNorm = columnas.map(c =>
+    c.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase()
+  )
+  const esHorario = colsNorm.includes("ano") && colsNorm.includes("h1")
+  const esViento  = colsNorm.includes("fecha") && colsNorm.includes("velocidad")
+  if (!esHorario && !esViento) throw new Error("formato_desconocido")
+  const filas = lineas.slice(1, 4).map(l => l.split(sep).slice(0, 6).map(c => c.trim()))
+  const totalFilas = lineas.length - 1
+  const totalFaltantes = lineas.slice(1).reduce((acc, l) =>
+    acc + l.split(sep).filter(c => c.trim() === "-" || c.trim() === "-9").length, 0
+  )
+  return { columnas: columnas.slice(0, 6), filas, totalFilas, totalFaltantes }
+}
 
-  useEffect(() => {
-    stationsApi.getAll().then((list) => {
-      setStations(list);
-      if (list.length) setStationId(list[0].id);
-    }).catch(() => {});
-    stationsApi.getVariables().then(setVariables).catch(() => {});
-    loadHistory();
-  }, []);
-
-  const loadHistory = () => {
-    setHistLoading(true);
-    uploadsApi.history(20)
-      .then(setHistory)
-      .catch(() => {})
-      .finally(() => setHistLoading(false));
-  };
+function DropZone({ variable, archivo, preview, error, onFile, onQuitar }) {
+  const ref = useRef()
+  const [drag, setDrag] = useState(false)
 
   const handleDrop = (e) => {
-    e.preventDefault();
-    setDragging(false);
-    const f = e.dataTransfer.files[0];
-    if (f) setFile(f);
-  };
+    e.preventDefault(); setDrag(false)
+    const f = e.dataTransfer.files[0]
+    if (f) onFile(f)
+  }
 
-  const handleSubmit = async () => {
-    if (!file || !stationId) return;
-    setUploading(true);
-    setError(null);
-    setResult(null);
-    try {
-      const res = await uploadsApi.upload(file, stationId, varId || null);
-      setResult(res);
-      setFile(null);
-      loadHistory();
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setUploading(false);
+  return (
+    <div style={{
+      background: "var(--surface)", border: `1px solid ${archivo ? "#22c55e40" : "var(--border)"}`,
+      borderRadius: 12, padding: "16px 20px",
+    }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontSize: 18 }}>{variable.icon}</span>
+          <span style={{ fontWeight: 600, fontSize: 14 }}>{variable.label}</span>
+        </div>
+        {archivo && (
+          <span style={{ background: "#22c55e20", color: "#22c55e", borderRadius: 20, padding: "2px 10px", fontSize: 11, fontWeight: 600 }}>
+            Listo
+          </span>
+        )}
+      </div>
+
+      <div
+        onDragOver={e => { e.preventDefault(); setDrag(true) }}
+        onDragLeave={() => setDrag(false)}
+        onDrop={handleDrop}
+        onClick={() => !archivo && ref.current.click()}
+        style={{
+          border: `2px dashed ${drag ? variable.color : archivo ? "#22c55e" : "var(--border)"}`,
+          borderRadius: 10, padding: "14px 16px", cursor: archivo ? "default" : "pointer",
+          background: drag ? `${variable.color}10` : archivo ? "#22c55e10" : "transparent",
+          transition: "all 0.15s",
+        }}
+      >
+        <input ref={ref} type="file" accept=".csv,.xlsx" className="hidden" onChange={e => e.target.files[0] && onFile(e.target.files[0])} />
+
+        {archivo ? (
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div>
+              <div style={{ fontWeight: 500, fontSize: 13 }}>{archivo.name}</div>
+              <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>
+                {(archivo.size / 1024).toFixed(1)} KB
+                {preview && ` · ${preview.totalFilas} filas · `}
+                {preview && <span style={{ color: preview.totalFaltantes > 0 ? "#f59e0b" : "#22c55e" }}>{preview.totalFaltantes} faltantes</span>}
+              </div>
+            </div>
+            <button onClick={e => { e.stopPropagation(); onQuitar() }}
+              style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", fontSize: 18, padding: 4 }}>✕</button>
+          </div>
+        ) : (
+          <div style={{ textAlign: "center", color: "var(--text-muted)", fontSize: 13 }}>
+            <div style={{ fontSize: 22, marginBottom: 4 }}>📂</div>
+            Arrastrá o <span style={{ color: variable.color }}>seleccioná</span> el archivo CSV / Excel
+          </div>
+        )}
+      </div>
+
+      {error && (
+        <div style={{ marginTop: 8, fontSize: 12, color: "#ef4444", background: "#ef444415", borderRadius: 6, padding: "6px 10px" }}>
+          ⚠️ {error}
+        </div>
+      )}
+
+      {preview && !error && (
+        <div style={{ marginTop: 10, overflowX: "auto" }}>
+          <table style={{ fontSize: 11, borderCollapse: "collapse", width: "100%" }}>
+            <thead>
+              <tr>
+                {preview.columnas.map(c => (
+                  <th key={c} style={{ padding: "3px 6px", color: "var(--text-muted)", fontWeight: 500, textAlign: "left", borderBottom: "1px solid var(--border)", whiteSpace: "nowrap" }}>{c}</th>
+                ))}
+                <th style={{ padding: "3px 6px", color: "var(--text-muted)" }}>…</th>
+              </tr>
+            </thead>
+            <tbody>
+              {preview.filas.map((fila, i) => (
+                <tr key={i}>
+                  {fila.map((c, j) => (
+                    <td key={j} style={{ padding: "3px 6px", color: c === "-" || c === "-9" ? "#ef4444" : "var(--text-muted)", whiteSpace: "nowrap" }}>{c}</td>
+                  ))}
+                  <td style={{ padding: "3px 6px", color: "var(--text-muted)" }}>…</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+
+export default function Upload() {
+  const { data: stationsData } = useFetch(() => stationsApi.getAll())
+  const stations = stationsData || []
+
+  const [stationId,  setStationId]  = useState("")
+  const [archivos,   setArchivos]   = useState({ temperatura: null, humedad: null, viento: null })
+  const [previews,   setPreviews]   = useState({ temperatura: null, humedad: null, viento: null })
+  const [errores,    setErrores]    = useState({ temperatura: "",   humedad: "",   viento: ""   })
+  const [cargando,   setCargando]   = useState(false)
+  const [resultados, setResultados] = useState({})
+  const [subido,     setSubido]     = useState(false)
+
+  const handleFile = (key, file) => {
+    setSubido(false); setResultados({})
+    setArchivos(p => ({ ...p, [key]: file }))
+    setErrores(p  => ({ ...p, [key]: "" }))
+    setPreviews(p => ({ ...p, [key]: null }))
+    const reader = new FileReader()
+    reader.onload = e => {
+      try {
+        const texto = new TextDecoder("windows-1252").decode(e.target.result)
+        setPreviews(p => ({ ...p, [key]: parsearCSV(texto) }))
+      } catch {
+        setErrores(p => ({ ...p, [key]: "Formato no reconocido. Verificá columnas: año, mes, dia, H1…H24" }))
+      }
     }
-  };
+    reader.readAsArrayBuffer(file)
+  }
 
-  const stationOpts  = stations.map((s) => ({ value: s.id,   label: s.name }));
-  const variableOpts = variables.map((v) => ({ value: v.id,  label: `${v.code} — ${v.name}` }));
+  const handleQuitar = (key) => {
+    setArchivos(p => ({ ...p, [key]: null }))
+    setPreviews(p => ({ ...p, [key]: null }))
+    setErrores(p  => ({ ...p, [key]: "" }))
+    setSubido(false); setResultados({})
+  }
+
+  const archivosListos  = Object.values(archivos).filter(Boolean).length
+  const hayAlgunArchivo = archivosListos > 0
+  const puedeSubir      = stationId && hayAlgunArchivo && !cargando
+
+  const handleSubir = async () => {
+    if (!puedeSubir) return
+    setCargando(true); setResultados({})
+    const nuevos = {}
+    for (const v of VARIABLES) {
+      if (!archivos[v.key]) continue
+      try {
+        const res = await uploadsApi.upload(archivos[v.key], stationId)
+        nuevos[v.key] = { ok: true, data: res }
+      } catch (e) {
+        nuevos[v.key] = { ok: false, error: e.message }
+      }
+    }
+    setResultados(nuevos); setCargando(false); setSubido(true)
+  }
 
   return (
     <div className="page">
       <header className="page__header">
-        <div>
-          <h1 className="page__title">Cargar datos</h1>
-          <p className="page__subtitle">Importa archivos CSV o Excel con mediciones</p>
-        </div>
+        <h1 className="page__title">Cargar datos</h1>
+        <p className="page__subtitle">Subí los archivos CSV de cada variable por estación</p>
       </header>
 
-      {/* ── Upload form ─────────────────────────────────────── */}
-      <Card className="upload-card">
-        <div className="upload-fields">
-          <Select
-            label="Estación *"
-            value={stationId}
-            onChange={setStationId}
-            options={stationOpts}
-            placeholder="Seleccionar estación..."
-          />
-          <Select
-            label="Variable (opcional)"
-            value={varId}
-            onChange={setVarId}
-            options={variableOpts}
-            placeholder="Detección automática"
-          />
-        </div>
-
-        {/* Drop zone */}
-        <div
-          className={`dropzone ${dragging ? "dropzone--active" : ""} ${file ? "dropzone--has-file" : ""}`}
-          onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
-          onDragLeave={() => setDragging(false)}
-          onDrop={handleDrop}
-          onClick={() => inputRef.current?.click()}
+      {/* Selector de estación */}
+      <div style={{
+        background: "var(--surface)", border: "1px solid var(--border)",
+        borderRadius: 12, padding: "16px 20px", marginBottom: 20,
+      }}>
+        <label style={{ fontSize: 11, fontWeight: 600, textTransform: "uppercase", color: "var(--text-muted)", display: "block", marginBottom: 6 }}>
+          Estación meteorológica *
+        </label>
+        <select
+          value={stationId}
+          onChange={e => { setStationId(e.target.value); setSubido(false) }}
+          style={{
+            width: "100%", padding: "8px 12px", borderRadius: 8, fontSize: 14,
+            background: "var(--surface-2, #1e293b)", border: "1px solid var(--border)",
+            color: "var(--text)",
+          }}
         >
-          <input
-            ref={inputRef}
-            type="file"
-            accept=".csv,.xlsx,.xls"
-            style={{ display: "none" }}
-            onChange={(e) => setFile(e.target.files[0])}
+          <option value="">Seleccionar estación…</option>
+          {stations.map(s => <option key={s.id} value={s.id}>{s.name} ({s.station_code})</option>)}
+        </select>
+      </div>
+
+      {/* Info formato */}
+      <div style={{
+        background: "#3b82f610", border: "1px solid #3b82f630",
+        borderRadius: 10, padding: "10px 16px", marginBottom: 20, fontSize: 12, color: "#93c5fd",
+      }}>
+        ℹ️ <strong>Formato esperado:</strong> separador punto y coma (;) · columnas año, mes, dia, H1…H24 · valores faltantes con guion (-)
+      </div>
+
+      {/* Drop zones */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 16, marginBottom: 20 }}>
+        {VARIABLES.map(v => (
+          <DropZone
+            key={v.key}
+            variable={v}
+            archivo={archivos[v.key]}
+            preview={previews[v.key]}
+            error={errores[v.key]}
+            onFile={f  => handleFile(v.key, f)}
+            onQuitar={() => handleQuitar(v.key)}
           />
-          {file ? (
-            <div className="dropzone__file">
-              <FileText size={32} />
-              <p><strong>{file.name}</strong></p>
-              <p style={{ opacity: 0.6, fontSize: "0.85rem" }}>
-                {(file.size / 1024).toFixed(1)} KB
-              </p>
-            </div>
-          ) : (
-            <div className="dropzone__hint">
-              <UploadCloud size={40} />
-              <p>Arrastra tu archivo aquí o <u>haz clic para buscar</u></p>
-              <p style={{ opacity: 0.5, fontSize: "0.8rem" }}>CSV, XLSX, XLS</p>
-            </div>
-          )}
+        ))}
+      </div>
+
+      {/* Botón + resultados */}
+      <div style={{
+        background: "var(--surface)", border: "1px solid var(--border)",
+        borderRadius: 12, padding: "16px 20px",
+      }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+          <span style={{ fontSize: 13, color: "var(--text-muted)" }}>
+            {archivosListos === 0 ? "Ningún archivo cargado" : `${archivosListos} de 3 archivo${archivosListos > 1 ? "s" : ""} listo${archivosListos > 1 ? "s" : ""}`}
+          </span>
+          <div style={{ display: "flex", gap: 6 }}>
+            {VARIABLES.map(v => (
+              <div key={v.key} style={{
+                width: 8, height: 8, borderRadius: "50%",
+                background: archivos[v.key] ? "#22c55e" : "var(--border)",
+              }} title={v.label} />
+            ))}
+          </div>
         </div>
 
-        <div className="upload-actions">
-          {file && (
-            <Button variant="ghost" onClick={() => setFile(null)}>
-              Quitar archivo
-            </Button>
-          )}
-          <Button
-            onClick={handleSubmit}
-            disabled={!file || !stationId || uploading}
-          >
-            {uploading ? "Subiendo…" : "Subir archivo"}
-          </Button>
-        </div>
+        <button
+          onClick={handleSubir}
+          disabled={!puedeSubir}
+          className="btn btn--primary"
+          style={{ width: "100%", opacity: puedeSubir ? 1 : 0.5, cursor: puedeSubir ? "pointer" : "not-allowed" }}
+        >
+          {cargando
+            ? "⏳ Procesando archivos…"
+            : !stationId
+              ? "Seleccioná una estación para continuar"
+              : !hayAlgunArchivo
+                ? "Seleccioná al menos un archivo"
+                : `Subir ${archivosListos} archivo${archivosListos > 1 ? "s" : ""} a la base de datos`
+          }
+        </button>
 
-        {uploading && <Spinner />}
-        {error   && <Alert>{error}</Alert>}
-        {result  && (
-          <Alert type="success">
-            ✅ <strong>{result.filename}</strong> procesado — {result.rows_inserted} filas insertadas
-            {result.variable_type && ` (${result.variable_type})`}
-          </Alert>
-        )}
-      </Card>
-
-      {/* ── Upload history ──────────────────────────────────── */}
-      <Card>
-        <h3 style={{ marginBottom: "1rem" }}>Historial de cargas</h3>
-        {histLoading ? <Spinner size={24} /> : (
-          <div className="table-wrap">
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>Archivo</th><th>Fuente</th><th>Filas</th>
-                  <th>Estado</th><th>Fecha</th>
-                </tr>
-              </thead>
-              <tbody>
-                {history.length === 0 ? (
-                  <tr><td colSpan={5} style={{ textAlign: "center", opacity: 0.5 }}>Sin historial</td></tr>
-                ) : history.map((f) => {
-                  const status = f.status?.startsWith("error") ? "error" : f.status;
-                  return (
-                    <tr key={f.id}>
-                      <td><FileText size={14} style={{ marginRight: 4 }} />{f.filename}</td>
-                      <td><Badge label={f.source} color="var(--accent)" /></td>
-                      <td>{f.rows_imported}</td>
-                      <td>
-                        <span className={`status-dot status-dot--${status}`}>
-                          {STATUS_ICON[status] || STATUS_ICON.processing}
-                          {f.status}
-                        </span>
-                      </td>
-                      <td style={{ fontSize: "0.8rem", opacity: 0.7 }}>
-                        {new Date(f.uploaded_at).toLocaleString("es-CR")}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+        {subido && Object.keys(resultados).length > 0 && (
+          <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 8 }}>
+            {Object.entries(resultados).map(([key, res]) => {
+              const v = VARIABLES.find(x => x.key === key)
+              return (
+                <div key={key} style={{
+                  borderRadius: 8, padding: "10px 14px", fontSize: 13,
+                  background: res.ok ? "#22c55e15" : "#ef444415",
+                  border: `1px solid ${res.ok ? "#22c55e30" : "#ef444430"}`,
+                }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span>{v.icon} <strong>{v.label}</strong></span>
+                    <span>{res.ok ? "✅" : "❌"}</span>
+                  </div>
+                  {res.ok ? (
+                    <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 4 }}>
+                      {res.data.rows_inserted?.toLocaleString()} filas insertadas · Variable: {res.data.variable_type}
+                    </div>
+                  ) : (
+                    <div style={{ fontSize: 12, color: "#ef4444", marginTop: 4 }}>{res.error}</div>
+                  )}
+                </div>
+              )
+            })}
           </div>
         )}
-        <div style={{ marginTop: "0.75rem", textAlign: "right" }}>
-          <Button variant="ghost" onClick={loadHistory}>Actualizar</Button>
-        </div>
-      </Card>
+      </div>
     </div>
-  );
+  )
 }

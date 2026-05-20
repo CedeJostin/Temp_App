@@ -1,54 +1,81 @@
-const BASE_URL = import.meta.env.VITE_API_URL || "/api";
+const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api'
 
-async function request(path, options = {}) {
-  const res = await fetch(`${BASE_URL}${path}`, {
-    headers: { "Content-Type": "application/json", ...options.headers },
-    ...options,
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.detail?.message || err.detail || `Error ${res.status}`);
-  }
-  return res.json();
-}
-
+// ── helpers ───────────────────────────────────────────────────
 const clean = (params) =>
   Object.fromEntries(
-    Object.entries(params).filter(([, v]) => v !== null && v !== undefined && v !== "")
-  );
+    Object.entries(params).filter(([, v]) => v !== null && v !== undefined && v !== '')
+  )
 
-// ─── Stations ─────────────────────────────────────────────────────────────────
+async function req(path, options = {}) {
+  const res = await fetch(`${BASE_URL}${path}`, {
+    headers: { 'Content-Type': 'application/json', ...options.headers },
+    ...options,
+  })
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail?.message || err.detail || `Error ${res.status}`)
+  }
+
+  return res.json()
+}
+
+// ── Stations ──────────────────────────────────────────────────
 export const stationsApi = {
-  getAll:      ()    => request("/stations/"),
-  getOne:      (id)  => request(`/stations/${id}`),
-  create:      (d)   => request("/stations/", { method: "POST", body: JSON.stringify(d) }),
-  getVariables:()    => request("/stations/variables/all"),
-};
+  getAll: () => req('/stations/'),
+  getOne: (id) => req(`/stations/${id}`),
+  create: (d) =>
+    req('/stations/', {
+      method: 'POST',
+      body: JSON.stringify(d),
+    }),
+  analysis: (id, params = {}) =>
+    req(`/stations/${id}/analysis?${new URLSearchParams(clean(params))}`),
+}
 
-// ─── Measurements ─────────────────────────────────────────────────────────────
+// ── Measurements ──────────────────────────────────────────────
 export const measurementsApi = {
-  list:    (p = {}) => request(`/measurements/?${new URLSearchParams(clean(p))}`),
-  summary: (p = {}) => request(`/measurements/summary?${new URLSearchParams(clean(p))}`),
-  byDate:  (p)      => request(`/measurements/by-date?${new URLSearchParams(clean(p))}`),
-  create:  (d)      => request("/measurements/", { method: "POST", body: JSON.stringify(d) }),
-  delete:  (id)     => request(`/measurements/${id}`, { method: "DELETE" }),
-  deleteRange: (p)  => request(`/measurements/?${new URLSearchParams(clean(p))}`, { method: "DELETE" }),
-};
+  list: (p = {}) =>
+    req(`/measurements/?${new URLSearchParams(clean(p))}`),
 
-// ─── Uploads ──────────────────────────────────────────────────────────────────
+  summary: (p = {}) =>
+    req(`/measurements/summary?${new URLSearchParams(clean(p))}`),
+
+  byDate: (p = {}) =>
+    req(`/measurements/by-date?${new URLSearchParams(clean(p))}`),
+
+  stats: (p = {}) =>
+    req(`/measurements/stats?${new URLSearchParams(clean(p))}`),
+
+  heatmap: (p = {}) =>
+    req(`/measurements/heatmap?${new URLSearchParams(clean(p))}`),
+
+  combined: (p = {}) =>
+    req(`/measurements/combined?${new URLSearchParams(clean(p))}`),
+}
+
+// ── Uploads ───────────────────────────────────────────────────
 export const uploadsApi = {
-  upload: async (file, station_id, variable_id = null) => {
-    const form = new FormData();
-    form.append("file", file);
-    const p = new URLSearchParams({ station_id });
-    if (variable_id) p.append("variable_id", variable_id);
-    const res = await fetch(`${BASE_URL}/uploads/?${p}`, { method: "POST", body: form });
+  upload: async (file, station_id) => {
+    const form = new FormData()
+    form.append('file', file)
+
+    const res = await fetch(
+      `${BASE_URL}/uploads/?station_id=${station_id}`,
+      {
+        method: 'POST',
+        body: form,
+      }
+    )
+
     if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      console.error("Upload 422 detail:", JSON.stringify(err, null, 2)); // ← línea nueva
-      throw new Error(err.detail?.message || err.detail || `Error ${res.status}`);
+      const err = await res.json().catch(() => ({}))
+      throw new Error(err.detail?.message || err.detail || `Error ${res.status}`)
     }
-    return res.json();
+
+    return res.json()
   },
-  history: (limit = 20) => request(`/uploads/history?limit=${limit}`),
-};
+
+  history: (limit = 20) =>
+    req(`/uploads/history?limit=${limit}`),
+}

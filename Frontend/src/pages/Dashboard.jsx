@@ -1,215 +1,183 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect } from "react"
+import { useFetch } from "../hooks/useFetch"
+import { stationsApi, measurementsApi } from "../services/api"
 import {
-  LineChart, Line, AreaChart, Area,
-  XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
-} from "recharts";
-import { Thermometer, Droplets, Zap, Wind, TrendingUp } from "lucide-react";
-import { stationsApi, measurementsApi } from "../services/api";
-import { Spinner, Alert, StatCard, Select, Card, Badge } from "../components/ui";
+  AreaChart, Area, XAxis, YAxis, CartesianGrid,
+  Tooltip, ResponsiveContainer, Legend
+} from "recharts"
 
-const VAR_META = {
-  TEMP:   { label: "Temperatura", unit: "°C",  color: "#ef4444", icon: <Thermometer size={22} /> },
-  HR:     { label: "Humedad",     unit: "%",   color: "#3b82f6", icon: <Droplets size={22} />    },
-  RAD:    { label: "Radiación",   unit: "W/m²",color: "#f59e0b", icon: <Zap size={22} />         },
-  VIENTO: { label: "Viento",     unit: "m/s", color: "#10b981", icon: <Wind size={22} />         },
-};
+const VARIABLES = [
+  { code: "TEMP",   label: "Temperatura",  unit: "°C",   color: "#ef4444", icon: "🌡️" },
+  { code: "HR",     label: "Humedad",      unit: "%",    color: "#3b82f6", icon: "💧" },
+  { code: "RAD",    label: "Radiación",    unit: "W/m²", color: "#f59e0b", icon: "⚡" },
+  { code: "VIENTO", label: "Viento",       unit: "m/s",  color: "#22c55e", icon: "💨" },
+]
 
-const PERIOD_OPTS = [
-  { value: "hour", label: "Por hora" },
-  { value: "day",  label: "Por día"  },
-  { value: "month",label: "Por mes"  },
-];
+const GROUP_OPTIONS = [
+  { value: "day",   label: "Por día"   },
+  { value: "month", label: "Por mes"   },
+  { value: "year",  label: "Por año"   },
+]
 
-function fmt(str) {
-  if (!str) return "";
-  const d = new Date(str);
-  return isNaN(d) ? str : d.toLocaleDateString("es-CR", { day: "2-digit", month: "short" });
+function SummaryCard({ variable, summary }) {
+  const s = summary?.find(r => r.variable_code === variable.code)
+  return (
+    <div style={{
+      background: "var(--surface)", border: `1px solid ${variable.color}40`,
+      borderTop: `3px solid ${variable.color}`,
+      borderRadius: 12, padding: "16px 20px",
+    }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+        <span style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", color: "var(--text-muted)", letterSpacing: "0.05em" }}>
+          {variable.label}
+        </span>
+        <span style={{ fontSize: 18 }}>{variable.icon}</span>
+      </div>
+      {s ? (
+        <>
+          <div style={{ fontSize: 28, fontWeight: 800, color: variable.color }}>
+            {s.avg?.toFixed(1)} <span style={{ fontSize: 14, fontWeight: 400, color: "var(--text-muted)" }}>{variable.unit}</span>
+          </div>
+          <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 6, lineHeight: 1.8 }}>
+            <span>↑ {s.max?.toFixed(1)} {variable.unit}</span>
+            <span style={{ margin: "0 8px" }}>·</span>
+            <span>↓ {s.min?.toFixed(1)} {variable.unit}</span>
+            <br />
+            <span>{s.count?.toLocaleString()} mediciones</span>
+          </div>
+        </>
+      ) : (
+        <div style={{ fontSize: 13, color: "var(--text-muted)", marginTop: 8 }}>— Sin datos</div>
+      )}
+    </div>
+  )
+}
+
+function VariableChart({ stationId, variable, groupBy }) {
+  const [data, setData] = useState([])
+  const [loading, setLoading] = useState(false)
+
+  useEffect(() => {
+    if (!stationId) return
+    setLoading(true)
+    measurementsApi.byDate({ station_id: stationId, variable_code: variable.code, group_by: groupBy })
+      .then(setData).catch(() => setData([])).finally(() => setLoading(false))
+  }, [stationId, variable.code, groupBy])
+
+  const fmt = (s) => {
+    if (!s) return ""
+    const d = new Date(s)
+    return isNaN(d) ? s : groupBy === "year"
+      ? d.getFullYear().toString()
+      : d.toLocaleDateString("es-CR", groupBy === "month" ? { month: "short", year: "2-digit" } : { day: "2-digit", month: "short" })
+  }
+
+  return (
+    <div style={{
+      background: "var(--surface)", border: "1px solid var(--border)",
+      borderRadius: 12, padding: "16px 20px",
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+        <span>{variable.icon}</span>
+        <span style={{ fontWeight: 600 }}>{variable.label}</span>
+        <span style={{ fontSize: 12, color: "var(--text-muted)" }}>{variable.unit}</span>
+      </div>
+
+      {loading && <div style={{ height: 160, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", fontSize: 13 }}>Cargando…</div>}
+
+      {!loading && data.length === 0 && (
+        <div style={{ height: 160, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", fontSize: 13 }}>
+          Sin datos para esta estación
+        </div>
+      )}
+
+      {!loading && data.length > 0 && (
+        <ResponsiveContainer width="100%" height={160}>
+          <AreaChart data={data} margin={{ top: 4, right: 8, left: -20, bottom: 0 }}>
+            <defs>
+              <linearGradient id={`grad-${variable.code}`} x1="0" y1="0" x2="0" y2="1">
+                <stop offset="5%"  stopColor={variable.color} stopOpacity={0.3} />
+                <stop offset="95%" stopColor={variable.color} stopOpacity={0}   />
+              </linearGradient>
+            </defs>
+            <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+            <XAxis dataKey="period" tickFormatter={fmt} tick={{ fontSize: 9, fill: "var(--text-muted)" }} interval="preserveStartEnd" />
+            <YAxis tick={{ fontSize: 9, fill: "var(--text-muted)" }} unit={variable.unit} />
+            <Tooltip labelFormatter={fmt} contentStyle={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 12 }} />
+            <Area type="monotone" dataKey="avg" name="Promedio" stroke={variable.color} fill={`url(#grad-${variable.code})`} strokeWidth={2} dot={false} />
+          </AreaChart>
+        </ResponsiveContainer>
+      )}
+    </div>
+  )
 }
 
 export default function Dashboard() {
-  const [stations, setStations]   = useState([]);
-  const [stationId, setStationId] = useState("");
-  const [summary, setSummary]     = useState([]);
-  const [charts, setCharts]       = useState({});
-  const [groupBy, setGroupBy]     = useState("day");
-  const [loading, setLoading]     = useState(false);
-  const [error, setError]         = useState(null);
+  const { data: stations } = useFetch(() => stationsApi.getAll())
+  const [stationId, setStationId] = useState("")
+  const [groupBy,   setGroupBy]   = useState("day")
+  const [summary,   setSummary]   = useState([])
 
-  // Load stations
+  const stationList = stations || []
+
   useEffect(() => {
-    stationsApi.getAll().then(setStations).catch(() => {});
-  }, []);
-
-  // Auto-select first station
-  useEffect(() => {
-    if (stations.length && !stationId) setStationId(stations[0].id);
-  }, [stations]);
-
-  // Load data when station or groupBy changes
-  useEffect(() => {
-    if (!stationId) return;
-    setLoading(true);
-    setError(null);
-
-    Promise.all([
-      measurementsApi.summary({ station_id: stationId }),
-      ...Object.keys(VAR_META).map((code) =>
-        measurementsApi
-          .byDate({ station_id: stationId, variable_code: code, group_by: groupBy })
-          .then((data) => ({ code, data }))
-          .catch(() => ({ code, data: [] }))
-      ),
-    ])
-      .then(([summaryData, ...chartResults]) => {
-        setSummary(summaryData);
-        const map = {};
-        chartResults.forEach(({ code, data }) => { map[code] = data; });
-        setCharts(map);
-      })
-      .catch((e) => setError(e.message))
-      .finally(() => setLoading(false));
-  }, [stationId, groupBy]);
-
-  const stationOpts = stations.map((s) => ({ value: s.id, label: s.name }));
+    if (!stationId) return
+    measurementsApi.summary({ station_id: stationId })
+      .then(setSummary).catch(() => setSummary([]))
+  }, [stationId])
 
   return (
     <div className="page">
-      <header className="page__header">
+      <header className="page__header" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
         <div>
           <h1 className="page__title">Dashboard</h1>
           <p className="page__subtitle">Resumen de mediciones ambientales</p>
         </div>
-        <div className="page__controls">
-          <Select
-            label="Estación"
-            value={stationId}
-            onChange={setStationId}
-            options={stationOpts}
-            placeholder="Seleccionar..."
-          />
-          <Select
-            label="Agrupación"
-            value={groupBy}
-            onChange={setGroupBy}
-            options={PERIOD_OPTS}
-          />
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <div>
+            <label style={{ fontSize: 11, fontWeight: 600, textTransform: "uppercase", color: "var(--text-muted)", display: "block", marginBottom: 3 }}>Estación</label>
+            <select
+              value={stationId}
+              onChange={e => setStationId(e.target.value)}
+              style={{ padding: "6px 12px", borderRadius: 8, border: "1px solid var(--border)", background: "var(--surface)", color: "var(--text)", fontSize: 13 }}
+            >
+              <option value="">Seleccionar…</option>
+              {stationList.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+          </div>
+          <div>
+            <label style={{ fontSize: 11, fontWeight: 600, textTransform: "uppercase", color: "var(--text-muted)", display: "block", marginBottom: 3 }}>Agrupación</label>
+            <select
+              value={groupBy}
+              onChange={e => setGroupBy(e.target.value)}
+              style={{ padding: "6px 12px", borderRadius: 8, border: "1px solid var(--border)", background: "var(--surface)", color: "var(--text)", fontSize: 13 }}
+            >
+              {GROUP_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+          </div>
         </div>
       </header>
 
-      {error && <Alert>{error}</Alert>}
-      {loading && <Spinner />}
-
-      {!loading && (
+      {!stationId ? (
+        <div style={{ textAlign: "center", padding: "4rem 0", color: "var(--text-muted)" }}>
+          <div style={{ fontSize: 48, marginBottom: 12 }}>🌤️</div>
+          <p>Seleccioná una estación para ver el resumen.</p>
+        </div>
+      ) : (
         <>
-          {/* ── Summary stats ───────────────────────────────── */}
-          <section className="stats-grid">
-            {Object.entries(VAR_META).map(([code, meta]) => {
-              const row = summary.find((s) => s.variable_code === code);
-              return (
-                <StatCard
-                  key={code}
-                  label={meta.label}
-                  value={row ? row.avg.toFixed(2) : null}
-                  unit={meta.unit}
-                  icon={meta.icon}
-                  color={meta.color}
-                />
-              );
-            })}
-          </section>
-
-          {/* ── Charts ──────────────────────────────────────── */}
-          <div className="charts-grid">
-            {Object.entries(VAR_META).map(([code, meta]) => {
-              const data = charts[code] || [];
-              return (
-                <Card key={code} className="chart-card">
-                  <div className="chart-card__header">
-                    <span style={{ color: meta.color }}>{meta.icon}</span>
-                    <h3>{meta.label}</h3>
-                    <Badge label={meta.unit} color={meta.color} />
-                  </div>
-                  {data.length === 0 ? (
-                    <p className="empty-hint">Sin datos para esta estación</p>
-                  ) : (
-                    <ResponsiveContainer width="100%" height={220}>
-                      <AreaChart data={data} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
-                        <defs>
-                          <linearGradient id={`grad-${code}`} x1="0" y1="0" x2="0" y2="1">
-                            <stop offset="5%"  stopColor={meta.color} stopOpacity={0.3} />
-                            <stop offset="95%" stopColor={meta.color} stopOpacity={0}   />
-                          </linearGradient>
-                        </defs>
-                        <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-                        <XAxis
-                          dataKey="period"
-                          tickFormatter={fmt}
-                          tick={{ fontSize: 11, fill: "var(--text-muted)" }}
-                          interval="preserveStartEnd"
-                        />
-                        <YAxis tick={{ fontSize: 11, fill: "var(--text-muted)" }} />
-                        <Tooltip
-                          formatter={(v) => [`${v.toFixed(2)} ${meta.unit}`, "Promedio"]}
-                          labelFormatter={fmt}
-                          contentStyle={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8 }}
-                        />
-                        <Area
-                          type="monotone"
-                          dataKey="avg"
-                          stroke={meta.color}
-                          strokeWidth={2}
-                          fill={`url(#grad-${code})`}
-                          dot={false}
-                        />
-                      </AreaChart>
-                    </ResponsiveContainer>
-                  )}
-                </Card>
-              );
-            })}
+          {/* Tarjetas resumen */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 14, marginBottom: 24 }}>
+            {VARIABLES.map(v => <SummaryCard key={v.code} variable={v} summary={summary} />)}
           </div>
 
-          {/* ── Summary table ───────────────────────────────── */}
-          {summary.length > 0 && (
-            <Card>
-              <h3 style={{ marginBottom: "1rem" }}>
-                <TrendingUp size={16} style={{ marginRight: 6 }} />
-                Estadísticas detalladas
-              </h3>
-              <div className="table-wrap">
-                <table className="table">
-                  <thead>
-                    <tr>
-                      <th>Variable</th><th>Min</th><th>Máx</th>
-                      <th>Promedio</th><th>Registros</th><th>Período</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {summary.map((row) => {
-                      const meta = VAR_META[row.variable_code] || {};
-                      return (
-                        <tr key={row.variable_code}>
-                          <td>
-                            <span style={{ color: meta.color, marginRight: 6 }}>{meta.icon}</span>
-                            {row.variable_name}
-                          </td>
-                          <td>{row.min?.toFixed(2)} {row.unit}</td>
-                          <td>{row.max?.toFixed(2)} {row.unit}</td>
-                          <td><strong>{row.avg?.toFixed(2)} {row.unit}</strong></td>
-                          <td>{row.count?.toLocaleString()}</td>
-                          <td style={{ fontSize: "0.75rem", opacity: 0.7 }}>
-                            {fmt(row.date_start)} → {fmt(row.date_end)}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </Card>
-          )}
+          {/* Gráficos */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(400px, 1fr))", gap: 16 }}>
+            {VARIABLES.map(v => (
+              <VariableChart key={v.code} stationId={stationId} variable={v} groupBy={groupBy} />
+            ))}
+          </div>
         </>
       )}
     </div>
-  );
+  )
 }

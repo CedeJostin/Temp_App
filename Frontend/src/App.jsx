@@ -5,6 +5,7 @@ import Analysis     from "./pages/Analysis";
 import Upload       from "./pages/Upload";
 import Stations     from "./pages/Stations";
 import Measurements from "./pages/Measurements";
+import Dataanalysis from "./pages/Dataanalysis";
 import "./App.css";
 
 export default function App() {
@@ -19,6 +20,7 @@ export default function App() {
             <Route path="/upload"      element={<Upload />}       />
             <Route path="/stations"    element={<Stations />}     />
             <Route path="/measurements" element={<Measurements />} />
+            <Route path="/Dataanalysis" element={<Dataanalysis />} />
           </Routes>
         </main>
       </div>

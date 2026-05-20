@@ -16,6 +16,7 @@ const links = [
   { to: "/upload",    label: "Cargar datos", icon: Upload          },
   { to: "/stations",  label: "Estaciones",   icon: MapPin          },
   { to: "/measurements", label: "Mediciones", icon: Activity       },
+  { to: "/Dataanalysis", label: "Dataanalysis", icon: BarChart2       },
 ];
 
 export default function Sidebar() {
