@@ -6,20 +6,27 @@ import {
 } from 'recharts'
 import { stationsApi, measurementsApi } from '../services/api'
 
-const MONTHS = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic']
-const HOURS  = Array.from({ length: 24 }, (_, i) => i)
+const MONTHS     = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic']
+const MONTHS_NUM = [1,2,3,4,5,6,7,8,9,10,11,12]
+const HOURS      = Array.from({ length: 24 }, (_, i) => i)
 
 const TABS = [
-  { id: 'overview', label: 'a) Visualización general' },
-  { id: 'fdp',      label: 'b) FDP'                   },
-  { id: 'isolines', label: 'c) Distribución temporal'  },
-  { id: 'combined', label: 'd) T × HR combinado'       },
+  { id: 'overview',       label: 'a) Visualización general'   },
+  { id: 'fdp',            label: 'b) FDP'                     },
+  { id: 'isolines',       label: 'c.1) Mapa de calor'         },
+  { id: 'daily-profile',  label: 'c.2) Perfil diario'         },
+  { id: 'annual-profile', label: 'c.3) Perfil anual'          },
+  { id: 'combined',       label: 'd) T × HR combinado'        },
 ]
 
 const fmt = (s) => {
   if (!s) return ''
   const d = new Date(s)
   return isNaN(d) ? s : d.toLocaleDateString('es-CR')
+}
+const fmtDoy = (doy) => {
+  const d = new Date(2000, 0, doy)
+  return d.toLocaleDateString('es-CR', { day: '2-digit', month: 'short' })
 }
 
 // ── UI helpers ────────────────────────────────────────────────
@@ -54,15 +61,43 @@ const StatBox = ({ label, value, unit, color }) => (
   </div>
 )
 
-const SectionCard = ({ title, subtitle, children }) => (
+const SectionCard = ({ title, subtitle, children, badge }) => (
   <Card>
-    <div style={{ marginBottom: 14 }}>
-      <h3 style={{ margin: 0, fontSize: 14, fontWeight: 700, color: '#f1f5f9' }}>{title}</h3>
-      {subtitle && <p style={{ margin: '4px 0 0', fontSize: 12, color: '#94a3b8' }}>{subtitle}</p>}
+    <div style={{ marginBottom: 14, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 8 }}>
+      <div>
+        <h3 style={{ margin: 0, fontSize: 14, fontWeight: 700, color: '#f1f5f9' }}>{title}</h3>
+        {subtitle && <p style={{ margin: '4px 0 0', fontSize: 12, color: '#94a3b8' }}>{subtitle}</p>}
+      </div>
+      {badge}
     </div>
     {children}
   </Card>
 )
+
+// Indicador de calidad del ajuste
+const QualityBadge = ({ quality }) => {
+  if (!quality) return null
+  const all_ok = quality.mse_ok && quality.r2_ok
+  return (
+    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+      {[
+        { label: `EMC ${quality.mse_target}`, ok: quality.mse_ok },
+        { label: `R² ${quality.r2_target}`,   ok: quality.r2_ok  },
+        { label: `Σw = ${quality.weights_sum?.toFixed(3)}`, ok: quality.weights_sum_ok },
+      ].map(({ label, ok }) => (
+        <span key={label} style={{
+          fontSize: 10, fontWeight: 600, borderRadius: 20,
+          padding: '2px 8px',
+          background: ok ? '#22c55e20' : '#ef444420',
+          color:      ok ? '#22c55e'   : '#ef4444',
+          border: `1px solid ${ok ? '#22c55e40' : '#ef444440'}`,
+        }}>
+          {ok ? '✓' : '✗'} {label}
+        </span>
+      ))}
+    </div>
+  )
+}
 
 // ── Mapa de calor ─────────────────────────────────────────────
 const lerp = (a, b, t) => Math.round(a + (b - a) * t)
@@ -71,16 +106,18 @@ const heatColor = (val, min, max, type) => {
   if (val == null) return '#1e293b'
   const t = max > min ? Math.max(0, Math.min(1, (val - min) / (max - min))) : 0
   if (type === 'TEMP') {
-    const r = t < 0.5 ? lerp(59, 250, t*2)   : lerp(250, 220, (t-0.5)*2)
-    const g = t < 0.5 ? lerp(130, 204, t*2)  : lerp(204, 38,  (t-0.5)*2)
-    const b = t < 0.5 ? lerp(246, 20, t*2)   : lerp(20, 38,   (t-0.5)*2)
+    const r = t < 0.5 ? lerp(59, 250, t*2)  : lerp(250, 220, (t-0.5)*2)
+    const g = t < 0.5 ? lerp(130, 204, t*2) : lerp(204, 38,  (t-0.5)*2)
+    const b = t < 0.5 ? lerp(246, 20, t*2)  : lerp(20, 38,   (t-0.5)*2)
     return `rgb(${r},${g},${b})`
   }
   const r = lerp(240, 30, t), g = lerp(249, 64, t), bl = lerp(255, 175, t)
   return `rgb(${r},${g},${bl})`
 }
 
-// ── Section A ─────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+// SECTION A — Visualización general
+// ══════════════════════════════════════════════════════════════
 function SectionOverview({ stationId, dateFrom, dateTo }) {
   const [tStats,  setTStats]  = useState(null)
   const [hStats,  setHStats]  = useState(null)
@@ -112,26 +149,37 @@ function SectionOverview({ stationId, dateFrom, dateTo }) {
   const StatsRow = ({ stats, color, unit }) => (
     <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16 }}>
       {[
-        { l: 'Media',  v: stats.mean },
-        { l: 'Desv.',  v: stats.std  },
-        { l: 'Mín',    v: stats.min  },
-        { l: 'Máx',    v: stats.max  },
-        { l: 'Q25',    v: stats.q25  },
-        { l: 'Q50',    v: stats.q50  },
-        { l: 'Q75',    v: stats.q75  },
-        { l: 'N',      v: stats.n    },
+        { l: 'Media', v: stats.mean },
+        { l: 'Desv.', v: stats.std  },
+        { l: 'Mín',   v: stats.min  },
+        { l: 'Máx',   v: stats.max  },
+        { l: 'Q25',   v: stats.q25  },
+        { l: 'Q50',   v: stats.q50  },
+        { l: 'Q75',   v: stats.q75  },
+        { l: 'Moda',  v: stats.mode },
+        { l: 'N',     v: stats.n    },
       ].map(({ l, v }) => <StatBox key={l} label={l} value={v} unit={l === 'N' ? '' : unit} color={color} />)}
     </div>
+  )
+
+  const DateRange = ({ stats }) => (
+    <span style={{ fontSize: 12, color: '#94a3b8' }}>
+      {fmt(stats.date_start)} → {fmt(stats.date_end)}
+      &nbsp;·&nbsp;Completitud: <strong style={{ color: '#22c55e' }}>{stats.completitud_pct}%</strong>
+    </span>
   )
 
   return (
     <>
       {tStats && (
-        <SectionCard title="Temperatura (T)" subtitle={`${fmt(tStats.date_start)} → ${fmt(tStats.date_end)} · Completitud: ${tStats.completitud_pct}%`}>
+        <SectionCard
+          title="Temperatura (T)"
+          subtitle={<DateRange stats={tStats} />}
+        >
           <StatsRow stats={tStats} color="#ef4444" unit="°C" />
           {tStats.anomalies_count > 0 && (
             <div style={{ marginBottom: 12, padding: '8px 12px', background: '#f59e0b20', border: '1px solid #f59e0b40', borderRadius: 6, fontSize: 12, color: '#f59e0b' }}>
-              ⚠️ {tStats.anomalies_count} valores anómalos detectados (±3σ)
+              ⚠️ {tStats.anomalies_count} valores anómalos detectados (|v − μ| &gt; 3σ) — revisar si deben descartarse
             </div>
           )}
           <ResponsiveContainer width="100%" height={260}>
@@ -139,17 +187,19 @@ function SectionOverview({ stationId, dateFrom, dateTo }) {
               <defs>
                 <linearGradient id="tg" x1="0" y1="0" x2="0" y2="1">
                   <stop offset="5%"  stopColor="#ef4444" stopOpacity={0.3} />
-                  <stop offset="95%" stopColor="#ef4444" stopOpacity={0}   />
+                  <stop offset="95%" stopColor="#ef4444" stopOpacity={0} />
                 </linearGradient>
               </defs>
               <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
               <XAxis dataKey="period" tickFormatter={fmt} tick={{ fontSize: 10, fill: '#94a3b8' }} />
               <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} unit="°C" />
               <Tooltip labelFormatter={fmt} contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }} />
-              <ReferenceLine y={tStats.mean} stroke="#ef4444" strokeDasharray="4 2" />
-              <Area type="monotone" dataKey="max" name="Máx"      stroke="#ef4444" fill="none"      strokeWidth={1} opacity={0.4} dot={false} />
-              <Area type="monotone" dataKey="avg" name="Promedio" stroke="#ef4444" fill="url(#tg)"  strokeWidth={2} dot={false} />
-              <Area type="monotone" dataKey="min" name="Mín"      stroke="#ef4444" fill="none"      strokeWidth={1} opacity={0.4} dot={false} />
+              <ReferenceLine y={tStats.mean} stroke="#ef4444" strokeDasharray="4 2" label={{ value: `μ=${tStats.mean?.toFixed(1)}°C`, fontSize: 10, fill: '#ef4444', position: 'right' }} />
+              <ReferenceLine y={tStats.q25}  stroke="#f97316" strokeDasharray="2 4" label={{ value: 'Q25', fontSize: 9, fill: '#f97316', position: 'right' }} />
+              <ReferenceLine y={tStats.q75}  stroke="#f97316" strokeDasharray="2 4" label={{ value: 'Q75', fontSize: 9, fill: '#f97316', position: 'right' }} />
+              <Area type="monotone" dataKey="max" name="Máx"      stroke="#ef4444" fill="none"     strokeWidth={1} opacity={0.4} dot={false} />
+              <Area type="monotone" dataKey="avg" name="Promedio" stroke="#ef4444" fill="url(#tg)" strokeWidth={2} dot={false} />
+              <Area type="monotone" dataKey="min" name="Mín"      stroke="#ef4444" fill="none"     strokeWidth={1} opacity={0.4} dot={false} />
               <Brush dataKey="period" height={18} stroke="#334155" tickFormatter={fmt} />
               <Legend />
             </AreaChart>
@@ -158,23 +208,34 @@ function SectionOverview({ stationId, dateFrom, dateTo }) {
       )}
 
       {hStats && (
-        <SectionCard title="Humedad Relativa (HR)" subtitle={`${fmt(hStats.date_start)} → ${fmt(hStats.date_end)} · Completitud: ${hStats.completitud_pct}%`}>
+        <SectionCard
+          title="Humedad Relativa (HR)"
+          subtitle={<DateRange stats={hStats} />}
+        >
           <StatsRow stats={hStats} color="#3b82f6" unit="%" />
+          {hStats.anomalies_count > 0 && (
+            <div style={{ marginBottom: 12, padding: '8px 12px', background: '#f59e0b20', border: '1px solid #f59e0b40', borderRadius: 6, fontSize: 12, color: '#f59e0b' }}>
+              ⚠️ {hStats.anomalies_count} valores anómalos detectados (|v − μ| &gt; 3σ)
+            </div>
+          )}
           <ResponsiveContainer width="100%" height={260}>
             <AreaChart data={hSeries} margin={{ top: 4, right: 8, left: -10, bottom: 0 }}>
               <defs>
                 <linearGradient id="hg" x1="0" y1="0" x2="0" y2="1">
                   <stop offset="5%"  stopColor="#3b82f6" stopOpacity={0.3} />
-                  <stop offset="95%" stopColor="#3b82f6" stopOpacity={0}   />
+                  <stop offset="95%" stopColor="#3b82f6" stopOpacity={0} />
                 </linearGradient>
               </defs>
               <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
               <XAxis dataKey="period" tickFormatter={fmt} tick={{ fontSize: 10, fill: '#94a3b8' }} />
               <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} unit="%" domain={[0, 100]} />
               <Tooltip labelFormatter={fmt} contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }} />
-              <Area type="monotone" dataKey="max" name="Máx"      stroke="#3b82f6" fill="none"      strokeWidth={1} opacity={0.4} dot={false} />
-              <Area type="monotone" dataKey="avg" name="Promedio" stroke="#3b82f6" fill="url(#hg)"  strokeWidth={2} dot={false} />
-              <Area type="monotone" dataKey="min" name="Mín"      stroke="#3b82f6" fill="none"      strokeWidth={1} opacity={0.4} dot={false} />
+              <ReferenceLine y={hStats.mean} stroke="#3b82f6" strokeDasharray="4 2" label={{ value: `μ=${hStats.mean?.toFixed(1)}%`, fontSize: 10, fill: '#3b82f6', position: 'right' }} />
+              <ReferenceLine y={hStats.q25}  stroke="#6366f1" strokeDasharray="2 4" label={{ value: 'Q25', fontSize: 9, fill: '#6366f1', position: 'right' }} />
+              <ReferenceLine y={hStats.q75}  stroke="#6366f1" strokeDasharray="2 4" label={{ value: 'Q75', fontSize: 9, fill: '#6366f1', position: 'right' }} />
+              <Area type="monotone" dataKey="max" name="Máx"      stroke="#3b82f6" fill="none"     strokeWidth={1} opacity={0.4} dot={false} />
+              <Area type="monotone" dataKey="avg" name="Promedio" stroke="#3b82f6" fill="url(#hg)" strokeWidth={2} dot={false} />
+              <Area type="monotone" dataKey="min" name="Mín"      stroke="#3b82f6" fill="none"     strokeWidth={1} opacity={0.4} dot={false} />
               <Brush dataKey="period" height={18} stroke="#334155" tickFormatter={fmt} />
               <Legend />
             </AreaChart>
@@ -185,111 +246,135 @@ function SectionOverview({ stationId, dateFrom, dateTo }) {
   )
 }
 
-// ── Section B ─────────────────────────────────────────────────
-
-// Tarjeta de parámetros para distribución Gaussiana
+// ══════════════════════════════════════════════════════════════
+// SECTION B — FDP  (corregido: muestra n_components, quality flags)
+// ══════════════════════════════════════════════════════════════
 const GaussianCards = ({ gaussians, unit }) => (
   <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 14 }}>
     {gaussians.map((g, i) => (
       <div key={i} style={{ background: '#0f172a', borderRadius: 8, padding: '8px 12px' }}>
         <div style={{ fontSize: 11, color: '#64748b', marginBottom: 4 }}>Gaussiana {i + 1}</div>
-        <div style={{ fontSize: 12, color: '#f1f5f9' }}>μ = <strong>{g.mu.toFixed(2)}{unit}</strong></div>
-        <div style={{ fontSize: 12, color: '#f1f5f9' }}>σ = <strong>{g.sigma.toFixed(2)}</strong></div>
-        <div style={{ fontSize: 12, color: '#f1f5f9' }}>w = <strong>{(g.w * 100).toFixed(1)}%</strong></div>
+        <div style={{ fontSize: 12, color: '#f1f5f9' }}>μ = <strong>{g.mu?.toFixed(2)}{unit}</strong></div>
+        <div style={{ fontSize: 12, color: '#f1f5f9' }}>σ = <strong>{g.sigma?.toFixed(3)}</strong></div>
+        <div style={{ fontSize: 12, color: '#f1f5f9' }}>w = <strong>{((g.w ?? 0) * 100).toFixed(1)}%</strong></div>
       </div>
     ))}
   </div>
 )
 
-// Tarjeta de parámetros para distribución Beta
 const BetaCards = ({ betas }) => (
   <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 14 }}>
     {betas.map((b, i) => (
       <div key={i} style={{ background: '#0f172a', borderRadius: 8, padding: '8px 12px' }}>
         <div style={{ fontSize: 11, color: '#64748b', marginBottom: 4 }}>Beta {i + 1}</div>
-        <div style={{ fontSize: 12, color: '#f1f5f9' }}>α = <strong>{b.alpha.toFixed(4)}</strong></div>
-        <div style={{ fontSize: 12, color: '#f1f5f9' }}>β = <strong>{b.beta.toFixed(4)}</strong></div>
-        <div style={{ fontSize: 12, color: '#f1f5f9' }}>Moda = <strong>{b.mode.toFixed(2)}%</strong></div>
-        <div style={{ fontSize: 12, color: '#f1f5f9' }}>Var = <strong>{b.variance.toFixed(4)}</strong></div>
-        <div style={{ fontSize: 12, color: '#f1f5f9' }}>w = <strong>{(b.w * 100).toFixed(1)}%</strong></div>
+        <div style={{ fontSize: 12, color: '#f1f5f9' }}>α = <strong>{b.alpha?.toFixed(4)}</strong></div>
+        <div style={{ fontSize: 12, color: '#f1f5f9' }}>β = <strong>{b.beta?.toFixed(4)}</strong></div>
+        <div style={{ fontSize: 12, color: '#f1f5f9' }}>Moda = <strong>{b.mode?.toFixed(2)}%</strong></div>
+        <div style={{ fontSize: 12, color: '#f1f5f9' }}>Var = <strong>{b.variance?.toFixed(4)}</strong></div>
+        <div style={{ fontSize: 12, color: '#f1f5f9' }}>w = <strong>{((b.w ?? 0) * 100).toFixed(1)}%</strong></div>
       </div>
     ))}
   </div>
 )
 
 function SectionFDP({ stationId, dateFrom, dateTo }) {
-  const [tStats, setTStats] = useState(null)
-  const [hStats, setHStats] = useState(null)
-  const [loading, setLoading] = useState(false)
-  const [error,   setError]   = useState(null)
+  const [tStats,      setTStats]      = useState(null)
+  const [hStats,      setHStats]      = useState(null)
+  const [loading,     setLoading]     = useState(false)
+  const [error,       setError]       = useState(null)
+  const [nComponents, setNComponents] = useState(2)
 
   const load = useCallback(async () => {
     if (!stationId) return
     setLoading(true); setError(null)
     try {
       const [t, h] = await Promise.all([
-        measurementsApi.stats({ station_id: stationId, variable_code: 'TEMP', date_from: dateFrom, date_to: dateTo }),
-        measurementsApi.stats({ station_id: stationId, variable_code: 'HR',   date_from: dateFrom, date_to: dateTo }),
+        measurementsApi.stats({ station_id: stationId, variable_code: 'TEMP', date_from: dateFrom, date_to: dateTo, n_components: nComponents }),
+        measurementsApi.stats({ station_id: stationId, variable_code: 'HR',   date_from: dateFrom, date_to: dateTo, n_components: nComponents }),
       ])
       setTStats(t); setHStats(h)
     } catch (e) { setError(e.message) }
     finally { setLoading(false) }
-  }, [stationId, dateFrom, dateTo])
+  }, [stationId, dateFrom, dateTo, nComponents])
 
   useEffect(() => { load() }, [load])
 
-  if (loading) return <Spinner />
-  if (error)   return <Err msg={error} />
+  if (error) return <Err msg={error} />
 
   return (
     <>
-      {/* ── FDP Temperatura — Gaussianas ── */}
-      {tStats && (
+      {/* Control de número de componentes */}
+      <Card style={{ marginBottom: 16, padding: '12px 20px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 13, color: '#94a3b8', fontWeight: 600 }}>Número de componentes:</span>
+          {[1, 2, 3, 4].map(n => (
+            <button key={n} onClick={() => setNComponents(n)} style={{
+              padding: '4px 14px', borderRadius: 20, border: '1px solid',
+              fontSize: 13, cursor: 'pointer',
+              background:   nComponents === n ? '#6366f1' : 'transparent',
+              borderColor:  nComponents === n ? '#6366f1' : '#334155',
+              color:        nComponents === n ? '#fff'    : '#94a3b8',
+            }}>{n}</button>
+          ))}
+          <span style={{ fontSize: 11, color: '#64748b' }}>
+            Para clima monzónico (2 estaciones) se recomiendan 2 componentes.
+          </span>
+        </div>
+      </Card>
+
+      {loading && <Spinner />}
+
+      {/* FDP Temperatura */}
+      {!loading && tStats && (
         <SectionCard
           title="FDP — Temperatura (Gaussianas)"
-          subtitle={`R² = ${tStats.r2?.toFixed(4) ?? '—'} · N = ${tStats.n.toLocaleString()}`}
+          subtitle={`R² = ${tStats.r2?.toFixed(4) ?? '—'} · EMC = ${tStats.mse?.toExponential(2) ?? '—'} · N = ${tStats.n?.toLocaleString()}`}
+          badge={<QualityBadge quality={tStats.quality} />}
         >
-          <GaussianCards gaussians={tStats.gaussians} unit="°C" />
-          <ResponsiveContainer width="100%" height={280}>
+          <GaussianCards gaussians={tStats.gaussians ?? []} unit="°C" />
+          <ResponsiveContainer width="100%" height={300}>
             <AreaChart data={tStats.fdp} margin={{ top: 4, right: 8, left: -10, bottom: 0 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
               <XAxis dataKey="x" tick={{ fontSize: 10, fill: '#94a3b8' }} unit="°C"
-                interval={Math.ceil(tStats.fdp.length / 10)} />
+                interval={Math.ceil((tStats.fdp?.length ?? 1) / 10)} />
               <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} />
-              <Tooltip contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }} />
+              <Tooltip contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }}
+                formatter={(v, name) => [typeof v === 'number' ? v.toFixed(5) : v, name]} />
               <Legend />
-              <Area type="monotone" dataKey="freq"  name="FDP real"       stroke="#ef4444" fill="#ef444420" strokeWidth={2} dot={false} />
-              <Area type="monotone" dataKey="model" name="Modelo (Σ Gauss)" stroke="#f97316" fill="none"   strokeWidth={2} strokeDasharray="6 3" dot={false} />
-              <ReferenceLine x={tStats.mean} stroke="#ef4444" strokeDasharray="4 2"
-                label={{ value: 'μ', fontSize: 11, fill: '#ef4444' }} />
+              <Area type="monotone" dataKey="freq"  name="FDP real"        stroke="#ef4444" fill="#ef444420" strokeWidth={2} dot={false} />
+              <Area type="monotone" dataKey="model" name="Modelo (Σ Gauss)" stroke="#f97316" fill="none"    strokeWidth={2} strokeDasharray="6 3" dot={false} />
+              {(tStats.gaussians ?? []).map((g, i) => (
+                <ReferenceLine key={i} x={g.mu} stroke="#ef444480" strokeDasharray="4 2"
+                  label={{ value: `μ${i+1}=${g.mu?.toFixed(1)}`, fontSize: 9, fill: '#ef4444' }} />
+              ))}
             </AreaChart>
           </ResponsiveContainer>
         </SectionCard>
       )}
 
-      {/* ── FDP Humedad Relativa — Beta ── */}
-      {hStats && (
+      {/* FDP Humedad */}
+      {!loading && hStats && (
         <SectionCard
           title="FDP — Humedad Relativa (Beta)"
-          subtitle={`R² = ${hStats.r2?.toFixed(4) ?? '—'} · N = ${hStats.n.toLocaleString()}`}
+          subtitle={`R² = ${hStats.r2?.toFixed(4) ?? '—'} · EMC = ${hStats.mse?.toExponential(2) ?? '—'} · N = ${hStats.n?.toLocaleString()}`}
+          badge={<QualityBadge quality={hStats.quality} />}
         >
-          {/* Muestra parámetros Beta reales (α, β, moda, varianza, w) */}
           <BetaCards betas={hStats.betas ?? []} />
-          <ResponsiveContainer width="100%" height={280}>
+          <ResponsiveContainer width="100%" height={300}>
             <AreaChart data={hStats.fdp} margin={{ top: 4, right: 8, left: -10, bottom: 0 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
               <XAxis dataKey="x" tick={{ fontSize: 10, fill: '#94a3b8' }} unit="%"
-                interval={Math.ceil(hStats.fdp.length / 10)} />
+                interval={Math.ceil((hStats.fdp?.length ?? 1) / 10)} />
               <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} />
-              <Tooltip contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }} />
+              <Tooltip contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }}
+                formatter={(v, name) => [typeof v === 'number' ? v.toFixed(5) : v, name]} />
               <Legend />
               <Area type="monotone" dataKey="freq"  name="FDP real"       stroke="#3b82f6" fill="#3b82f620" strokeWidth={2} dot={false} />
               <Area type="monotone" dataKey="model" name="Modelo (Σ Beta)" stroke="#f97316" fill="none"    strokeWidth={2} strokeDasharray="6 3" dot={false} />
-              {/* Línea de referencia en la moda de la primera Beta */}
-              {hStats.betas?.[0] && (
-                <ReferenceLine x={hStats.betas[0].mode} stroke="#3b82f6" strokeDasharray="4 2"
-                  label={{ value: 'moda₁', fontSize: 11, fill: '#3b82f6' }} />
-              )}
+              {(hStats.betas ?? []).map((b, i) => (
+                <ReferenceLine key={i} x={b.mode} stroke="#3b82f680" strokeDasharray="4 2"
+                  label={{ value: `moda${i+1}=${b.mode?.toFixed(1)}%`, fontSize: 9, fill: '#3b82f6' }} />
+              ))}
             </AreaChart>
           </ResponsiveContainer>
         </SectionCard>
@@ -298,98 +383,145 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
   )
 }
 
-// ── Section C ─────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+// SECTION C.1 — Mapa de calor  (corregido: agrega tab hora/semana)
+// ══════════════════════════════════════════════════════════════
 function SectionIsolines({ stationId, dateFrom, dateTo }) {
-  const [tHm,     setTHm]     = useState(null)
-  const [hHm,     setHHm]     = useState(null)
-  const [tMo,     setTMo]     = useState([])
-  const [hMo,     setHMo]     = useState([])
-  const [loading, setLoading] = useState(false)
-  const [error,   setError]   = useState(null)
+  const [groupBy,  setGroupBy]  = useState('hour')
+  const [tHm,      setTHm]      = useState(null)
+  const [hHm,      setHHm]      = useState(null)
+  const [tMo,      setTMo]      = useState([])
+  const [hMo,      setHMo]      = useState([])
+  const [loading,  setLoading]  = useState(false)
+  const [error,    setError]    = useState(null)
 
   const load = useCallback(async () => {
     if (!stationId) return
     setLoading(true); setError(null)
     try {
       const [th, hh, tm, hm] = await Promise.all([
-        measurementsApi.heatmap({ station_id: stationId, variable_code: 'TEMP', date_from: dateFrom, date_to: dateTo }),
-        measurementsApi.heatmap({ station_id: stationId, variable_code: 'HR',   date_from: dateFrom, date_to: dateTo }),
-        measurementsApi.byDate({  station_id: stationId, variable_code: 'TEMP', group_by: 'month', date_from: dateFrom, date_to: dateTo }),
-        measurementsApi.byDate({  station_id: stationId, variable_code: 'HR',   group_by: 'month', date_from: dateFrom, date_to: dateTo }),
+        measurementsApi.heatmap({ station_id: stationId, variable_code: 'TEMP', group_by: groupBy, date_from: dateFrom, date_to: dateTo }),
+        measurementsApi.heatmap({ station_id: stationId, variable_code: 'HR',   group_by: groupBy, date_from: dateFrom, date_to: dateTo }),
+        measurementsApi.byDate({ station_id: stationId, variable_code: 'TEMP', group_by: 'month', date_from: dateFrom, date_to: dateTo }),
+        measurementsApi.byDate({ station_id: stationId, variable_code: 'HR',   group_by: 'month', date_from: dateFrom, date_to: dateTo }),
       ])
       setTHm(th); setHHm(hh); setTMo(tm); setHMo(hm)
     } catch (e) { setError(e.message) }
     finally { setLoading(false) }
-  }, [stationId, dateFrom, dateTo])
+  }, [stationId, dateFrom, dateTo, groupBy])
 
   useEffect(() => { load() }, [load])
 
-  if (loading) return <Spinner />
-  if (error)   return <Err msg={error} />
+  if (error) return <Err msg={error} />
 
+  // Construir matriz mes × eje
   const buildMatrix = (hm) => {
     if (!hm) return null
-    const mat = Array.from({ length: 12 }, () => Array(24).fill(null))
-    hm.matrix.forEach(({ mes, hora, avg }) => { mat[mes - 1][hora] = avg })
-    return mat
+    const ejeProp  = hm.eje_label ?? 'hora'
+    const ejeRange = hm.eje_range ?? HOURS
+    const mat = Array.from({ length: 12 }, () => Array(ejeRange.length).fill(null))
+    hm.matrix.forEach(row => {
+      const mi  = (row.mes ?? 1) - 1
+      const ej  = row[ejeProp]
+      const idx = ejeRange.indexOf(ej)
+      if (mi >= 0 && mi < 12 && idx >= 0) mat[mi][idx] = row.avg
+    })
+    return { mat, ejeRange }
   }
 
-  const matT = buildMatrix(tHm)
-  const matH = buildMatrix(hHm)
+  const tBuilt = buildMatrix(tHm)
+  const hBuilt = buildMatrix(hHm)
+  const ejeLabel = groupBy === 'week' ? 'Sem.' : 'Hr.'
 
-  const HeatTable = ({ mat, hm, type, unit }) => (
-    <SectionCard title={`Mapa de calor — ${type === 'TEMP' ? 'Temperatura' : 'Humedad Relativa'} (mes × hora)`}>
-      <div style={{ overflowX: 'auto' }}>
-        <table style={{ borderCollapse: 'collapse', fontSize: 10 }}>
-          <thead>
-            <tr>
-              <th style={{ padding: '3px 8px', color: '#64748b', textAlign: 'left', fontWeight: 500 }}>Mes\Hr</th>
-              {HOURS.map(h => <th key={h} style={{ padding: '2px 1px', color: '#64748b', minWidth: 28, fontWeight: 400 }}>{String(h).padStart(2,'0')}</th>)}
-            </tr>
-          </thead>
-          <tbody>
-            {MONTHS.map((m, mi) => (
-              <tr key={m}>
-                <td style={{ padding: '2px 8px', color: '#94a3b8', fontWeight: 600, whiteSpace: 'nowrap' }}>{m}</td>
-                {HOURS.map(h => {
-                  const v = mat[mi][h]
-                  return (
-                    <td key={h}
-                      title={v != null ? `${m} ${String(h).padStart(2,'0')}:00 → ${v}${unit}` : 'Sin dato'}
-                      style={{ background: heatColor(v, hm.min, hm.max, type), height: 22, borderRadius: 2 }}
-                    />
-                  )
-                })}
+  const HeatTable = ({ built, hm, type, unit }) => {
+    if (!built || !hm) return null
+    const { mat, ejeRange } = built
+    return (
+      <SectionCard title={`Mapa de calor — ${type === 'TEMP' ? 'Temperatura' : 'Humedad Relativa'} (mes × ${groupBy === 'week' ? 'semana' : 'hora'})`}>
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ borderCollapse: 'collapse', fontSize: 10 }}>
+            <thead>
+              <tr>
+                <th style={{ padding: '3px 8px', color: '#64748b', textAlign: 'left', fontWeight: 500 }}>Mes\{ejeLabel}</th>
+                {ejeRange.map(e => (
+                  <th key={e} style={{ padding: '2px 1px', color: '#64748b', minWidth: groupBy === 'week' ? 48 : 28, fontWeight: 400 }}>
+                    {groupBy === 'week' ? `S${e}` : String(e).padStart(2, '0')}
+                  </th>
+                ))}
               </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 10, fontSize: 11, color: '#64748b' }}>
-        <span>{hm.min.toFixed(1)}{unit}</span>
-        <div style={{ flex: 1, height: 8, borderRadius: 4, background: type === 'TEMP' ? 'linear-gradient(to right,#3b82f6,#facc15,#ef4444)' : 'linear-gradient(to right,#f0f9ff,#1d4ed8)' }} />
-        <span>{hm.max.toFixed(1)}{unit}</span>
-      </div>
-    </SectionCard>
-  )
+            </thead>
+            <tbody>
+              {MONTHS.map((m, mi) => (
+                <tr key={m}>
+                  <td style={{ padding: '2px 8px', color: '#94a3b8', fontWeight: 600, whiteSpace: 'nowrap' }}>{m}</td>
+                  {ejeRange.map((e, ei) => {
+                    const v = mat[mi][ei]
+                    return (
+                      <td key={e}
+                        title={v != null ? `${m} ${groupBy === 'week' ? `Sem${e}` : `${String(e).padStart(2,'0')}:00`} → ${v}${unit}` : 'Sin dato'}
+                        style={{ background: heatColor(v, hm.min, hm.max, type), height: 22, borderRadius: 2 }}
+                      />
+                    )
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 10, fontSize: 11, color: '#64748b' }}>
+          <span>{hm.min?.toFixed(1)}{unit}</span>
+          <div style={{ flex: 1, height: 8, borderRadius: 4, background: type === 'TEMP' ? 'linear-gradient(to right,#3b82f6,#facc15,#ef4444)' : 'linear-gradient(to right,#f0f9ff,#1d4ed8)' }} />
+          <span>{hm.max?.toFixed(1)}{unit}</span>
+        </div>
+      </SectionCard>
+    )
+  }
 
   return (
     <>
-      {matT && tHm && <HeatTable mat={matT} hm={tHm} type="TEMP" unit="°C" />}
-      {matH && hHm && <HeatTable mat={matH} hm={hHm} type="HR"   unit="%"  />}
+      {/* Selector hora / semana */}
+      <Card style={{ padding: '12px 20px', marginBottom: 16 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <span style={{ fontSize: 13, color: '#94a3b8', fontWeight: 600 }}>Agrupación eje secundario:</span>
+          {[
+            { v: 'hour', label: 'Mes × Hora' },
+            { v: 'week', label: 'Mes × Semana' },
+          ].map(({ v, label }) => (
+            <button key={v} onClick={() => setGroupBy(v)} style={{
+              padding: '5px 16px', borderRadius: 20, border: '1px solid',
+              fontSize: 13, cursor: 'pointer',
+              background:   groupBy === v ? '#3b82f6' : 'transparent',
+              borderColor:  groupBy === v ? '#3b82f6' : '#334155',
+              color:        groupBy === v ? '#fff'    : '#94a3b8',
+            }}>{label}</button>
+          ))}
+        </div>
+      </Card>
 
+      {loading && <Spinner />}
+
+      {!loading && (
+        <>
+          <HeatTable built={tBuilt} hm={tHm} type="TEMP" unit="°C" />
+          <HeatTable built={hBuilt} hm={hHm} type="HR"   unit="%"  />
+        </>
+      )}
+
+      {/* Variación anual promedio — gráfico de líneas */}
       {(tMo.length > 0 || hMo.length > 0) && (
-        <SectionCard title="Variación anual promedio" subtitle="Promedios mensuales de T y HR">
+        <SectionCard title="Variación anual promedio (promedios mensuales T y HR)">
           <ResponsiveContainer width="100%" height={280}>
             <LineChart margin={{ top: 4, right: 40, left: -10, bottom: 0 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
               <XAxis dataKey="period" allowDuplicatedCategory={false} tickFormatter={fmt} tick={{ fontSize: 10, fill: '#94a3b8' }} />
               <YAxis yAxisId="t" unit="°C" tick={{ fontSize: 10, fill: '#ef4444' }} />
-              <YAxis yAxisId="h" orientation="right" unit="%" domain={[0,100]} tick={{ fontSize: 10, fill: '#3b82f6' }} />
+              <YAxis yAxisId="h" orientation="right" unit="%" domain={[0, 100]} tick={{ fontSize: 10, fill: '#3b82f6' }} />
               <Tooltip labelFormatter={fmt} contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }} />
               <Legend />
-              <Line yAxisId="t" data={tMo} type="monotone" dataKey="avg" name="T promedio (°C)" stroke="#ef4444" strokeWidth={2} dot={false} />
-              <Line yAxisId="h" data={hMo} type="monotone" dataKey="avg" name="HR promedio (%)" stroke="#3b82f6" strokeWidth={2} dot={false} />
+              <Line yAxisId="t" data={tMo} type="monotone" dataKey="avg" name="T promedio (°C)"  stroke="#ef4444" strokeWidth={2} dot={false} />
+              <Line yAxisId="t" data={tMo} type="monotone" dataKey="max" name="T máx (°C)"       stroke="#ef444460" strokeWidth={1} strokeDasharray="4 2" dot={false} />
+              <Line yAxisId="t" data={tMo} type="monotone" dataKey="min" name="T mín (°C)"       stroke="#ef444460" strokeWidth={1} strokeDasharray="4 2" dot={false} />
+              <Line yAxisId="h" data={hMo} type="monotone" dataKey="avg" name="HR promedio (%)"  stroke="#3b82f6" strokeWidth={2} dot={false} />
             </LineChart>
           </ResponsiveContainer>
         </SectionCard>
@@ -398,17 +530,282 @@ function SectionIsolines({ stationId, dateFrom, dateTo }) {
   )
 }
 
-// ── Section D ─────────────────────────────────────────────────
-function SectionCombined({ stationId, stationAlt, dateFrom, dateTo }) {
-  const [data,    setData]    = useState(null)
-  const [loading, setLoading] = useState(false)
-  const [error,   setError]   = useState(null)
+// ══════════════════════════════════════════════════════════════
+// SECTION C.2 — Perfil diario promedio por mes  (NUEVO)
+// ══════════════════════════════════════════════════════════════
+function SectionDailyProfile({ stationId, dateFrom, dateTo }) {
+  const [tProfile, setTProfile] = useState(null)
+  const [hProfile, setHProfile] = useState(null)
+  const [loading,  setLoading]  = useState(false)
+  const [error,    setError]    = useState(null)
+  const [selMonth, setSelMonth] = useState('0')  // '0' = anual, '1'-'12' = mes
 
   const load = useCallback(async () => {
     if (!stationId) return
     setLoading(true); setError(null)
     try {
-      const r = await measurementsApi.combined({ station_id: stationId, altitude: stationAlt || 0, date_from: dateFrom, date_to: dateTo })
+      const [tp, hp] = await Promise.all([
+        measurementsApi.dailyProfile({ station_id: stationId, variable_code: 'TEMP', date_from: dateFrom, date_to: dateTo }),
+        measurementsApi.dailyProfile({ station_id: stationId, variable_code: 'HR',   date_from: dateFrom, date_to: dateTo }),
+      ])
+      setTProfile(tp)
+      setHProfile(hp)
+    } catch (e) { setError(e.message) }
+    finally { setLoading(false) }
+  }, [stationId, dateFrom, dateTo])
+
+  useEffect(() => { load() }, [load])
+
+  if (loading) return <Spinner />
+  if (error)   return <Err msg={error} />
+  if (!tProfile && !hProfile) return null
+
+  const getTData = () => {
+    if (!tProfile) return []
+    if (selMonth === '0') return tProfile.annual ?? []
+    return tProfile.monthly?.[selMonth] ?? []
+  }
+  const getHData = () => {
+    if (!hProfile) return []
+    if (selMonth === '0') return hProfile.annual ?? []
+    return hProfile.monthly?.[selMonth] ?? []
+  }
+
+  const MonthSelector = () => (
+    <Card style={{ padding: '12px 20px', marginBottom: 16 }}>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+        <span style={{ fontSize: 13, color: '#94a3b8', fontWeight: 600, marginRight: 4 }}>Período:</span>
+        <button onClick={() => setSelMonth('0')} style={{
+          padding: '4px 12px', borderRadius: 20, border: '1px solid', fontSize: 12, cursor: 'pointer',
+          background: selMonth === '0' ? '#22c55e' : 'transparent',
+          borderColor: selMonth === '0' ? '#22c55e' : '#334155',
+          color: selMonth === '0' ? '#000' : '#94a3b8',
+        }}>Anual</button>
+        {MONTHS.map((m, i) => (
+          <button key={i} onClick={() => setSelMonth(String(i + 1))} style={{
+            padding: '4px 10px', borderRadius: 20, border: '1px solid', fontSize: 12, cursor: 'pointer',
+            background: selMonth === String(i + 1) ? '#6366f1' : 'transparent',
+            borderColor: selMonth === String(i + 1) ? '#6366f1' : '#334155',
+            color: selMonth === String(i + 1) ? '#fff' : '#94a3b8',
+          }}>{m}</button>
+        ))}
+      </div>
+    </Card>
+  )
+
+  const tData = getTData()
+  const hData = getHData()
+  const monthLabel = selMonth === '0' ? 'Anual' : MONTHS[parseInt(selMonth) - 1]
+
+  return (
+    <>
+      <div style={{ marginBottom: 8, padding: '4px 0' }}>
+        <p style={{ margin: 0, fontSize: 13, color: '#94a3b8' }}>
+          Perfil diario promedio (c.2): estadísticos horarios de T (max, min, avg, moda, Q25, Q75) y HR (moda, avg).
+          Los máximos permiten ver si ocurren en momentos específicos del día.
+        </p>
+      </div>
+      <MonthSelector />
+
+      {/* Temperatura — perfil diario */}
+      {tData.length > 0 && (
+        <SectionCard title={`Temperatura — Perfil diario (${monthLabel})`} subtitle="Estadísticos horarios">
+          <ResponsiveContainer width="100%" height={300}>
+            <AreaChart data={tData} margin={{ top: 4, right: 8, left: -10, bottom: 0 }}>
+              <defs>
+                <linearGradient id="tpg" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%"  stopColor="#ef4444" stopOpacity={0.25} />
+                  <stop offset="95%" stopColor="#ef4444" stopOpacity={0} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+              <XAxis dataKey="hora" tickFormatter={h => `${String(h).padStart(2,'0')}:00`} tick={{ fontSize: 10, fill: '#94a3b8' }} />
+              <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} unit="°C" />
+              <Tooltip
+                labelFormatter={h => `${String(h).padStart(2,'0')}:00`}
+                contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }}
+              />
+              <Legend />
+              <Area type="monotone" dataKey="max"  name="Máx"     stroke="#ef4444" fill="none"     strokeWidth={1} opacity={0.5} dot={false} />
+              <Area type="monotone" dataKey="q75"  name="Q75"     stroke="#f97316" fill="none"     strokeWidth={1} strokeDasharray="4 2" dot={false} />
+              <Area type="monotone" dataKey="avg"  name="Promedio" stroke="#ef4444" fill="url(#tpg)" strokeWidth={2} dot={false} />
+              <Area type="monotone" dataKey="mode" name="Moda"    stroke="#fbbf24" fill="none"     strokeWidth={1} strokeDasharray="6 2" dot={false} />
+              <Area type="monotone" dataKey="q25"  name="Q25"     stroke="#f97316" fill="none"     strokeWidth={1} strokeDasharray="4 2" dot={false} />
+              <Area type="monotone" dataKey="min"  name="Mín"     stroke="#ef4444" fill="none"     strokeWidth={1} opacity={0.5} dot={false} />
+            </AreaChart>
+          </ResponsiveContainer>
+        </SectionCard>
+      )}
+
+      {/* Humedad — perfil diario */}
+      {hData.length > 0 && (
+        <SectionCard title={`Humedad Relativa — Perfil diario (${monthLabel})`} subtitle="Estadísticos horarios (moda como estadístico principal)">
+          <ResponsiveContainer width="100%" height={300}>
+            <AreaChart data={hData} margin={{ top: 4, right: 8, left: -10, bottom: 0 }}>
+              <defs>
+                <linearGradient id="hpg" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%"  stopColor="#3b82f6" stopOpacity={0.25} />
+                  <stop offset="95%" stopColor="#3b82f6" stopOpacity={0} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+              <XAxis dataKey="hora" tickFormatter={h => `${String(h).padStart(2,'0')}:00`} tick={{ fontSize: 10, fill: '#94a3b8' }} />
+              <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} unit="%" domain={[0, 100]} />
+              <Tooltip
+                labelFormatter={h => `${String(h).padStart(2,'0')}:00`}
+                contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }}
+              />
+              <Legend />
+              <Area type="monotone" dataKey="max"  name="Máx"    stroke="#3b82f6" fill="none"     strokeWidth={1} opacity={0.5} dot={false} />
+              <Area type="monotone" dataKey="q75"  name="Q75"    stroke="#6366f1" fill="none"     strokeWidth={1} strokeDasharray="4 2" dot={false} />
+              <Area type="monotone" dataKey="avg"  name="Promedio" stroke="#3b82f6" fill="url(#hpg)" strokeWidth={2} dot={false} />
+              <Area type="monotone" dataKey="mode" name="Moda"   stroke="#a78bfa" fill="none"     strokeWidth={2} strokeDasharray="6 2" dot={false} />
+              <Area type="monotone" dataKey="q25"  name="Q25"    stroke="#6366f1" fill="none"     strokeWidth={1} strokeDasharray="4 2" dot={false} />
+              <Area type="monotone" dataKey="min"  name="Mín"    stroke="#3b82f6" fill="none"     strokeWidth={1} opacity={0.5} dot={false} />
+            </AreaChart>
+          </ResponsiveContainer>
+        </SectionCard>
+      )}
+    </>
+  )
+}
+
+// ══════════════════════════════════════════════════════════════
+// SECTION C.3 — Perfil anual promedio  (NUEVO)
+// ══════════════════════════════════════════════════════════════
+function SectionAnnualProfile({ stationId, dateFrom, dateTo }) {
+  const [tProfile, setTProfile] = useState(null)
+  const [hProfile, setHProfile] = useState(null)
+  const [loading,  setLoading]  = useState(false)
+  const [error,    setError]    = useState(null)
+
+  const load = useCallback(async () => {
+    if (!stationId) return
+    setLoading(true); setError(null)
+    try {
+      const [tp, hp] = await Promise.all([
+        measurementsApi.annualProfile({ station_id: stationId, variable_code: 'TEMP', date_from: dateFrom, date_to: dateTo }),
+        measurementsApi.annualProfile({ station_id: stationId, variable_code: 'HR',   date_from: dateFrom, date_to: dateTo }),
+      ])
+      setTProfile(tp)
+      setHProfile(hp)
+    } catch (e) { setError(e.message) }
+    finally { setLoading(false) }
+  }, [stationId, dateFrom, dateTo])
+
+  useEffect(() => { load() }, [load])
+
+  if (loading) return <Spinner />
+  if (error)   return <Err msg={error} />
+  if (!tProfile && !hProfile) return null
+
+  const tSeries = tProfile?.series ?? []
+  const hSeries = hProfile?.series ?? []
+
+  // Marcadores de inicio de mes (aproximado, año no bisiesto)
+  const monthDoys = [1,32,60,91,121,152,182,213,244,274,305,335]
+
+  return (
+    <>
+      <div style={{ marginBottom: 8 }}>
+        <p style={{ margin: 0, fontSize: 13, color: '#94a3b8' }}>
+          Perfil anual promedio (c.3): media diaria de T y moda diaria de HR promediadas por día del año sobre todo el período.
+          Muestra si los máximos ocurren en momentos específicos del año.
+        </p>
+      </div>
+
+      {/* Temperatura anual */}
+      {tSeries.length > 0 && (
+        <SectionCard
+          title="Temperatura — Variación anual promedio"
+          subtitle={`${tProfile.date_start ? fmt(tProfile.date_start) : ''} → ${tProfile.date_end ? fmt(tProfile.date_end) : ''} · Estadístico: media diaria`}
+        >
+          <ResponsiveContainer width="100%" height={300}>
+            <AreaChart data={tSeries} margin={{ top: 4, right: 8, left: -10, bottom: 0 }}>
+              <defs>
+                <linearGradient id="tag" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%"  stopColor="#ef4444" stopOpacity={0.2} />
+                  <stop offset="95%" stopColor="#ef4444" stopOpacity={0} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+              <XAxis dataKey="doy" tickFormatter={fmtDoy}
+                ticks={monthDoys} tick={{ fontSize: 10, fill: '#94a3b8' }} />
+              <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} unit="°C" />
+              <Tooltip labelFormatter={fmtDoy}
+                contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }} />
+              <Legend />
+              <Area type="monotone" dataKey="max" name="Máx"     stroke="#ef4444" fill="none"     strokeWidth={1} opacity={0.4} dot={false} />
+              <Area type="monotone" dataKey="q75" name="Q75"     stroke="#f97316" fill="none"     strokeWidth={1} strokeDasharray="4 2" dot={false} />
+              <Area type="monotone" dataKey="avg" name="Media"   stroke="#ef4444" fill="url(#tag)" strokeWidth={2} dot={false} />
+              <Area type="monotone" dataKey="q25" name="Q25"     stroke="#f97316" fill="none"     strokeWidth={1} strokeDasharray="4 2" dot={false} />
+              <Area type="monotone" dataKey="min" name="Mín"     stroke="#ef4444" fill="none"     strokeWidth={1} opacity={0.4} dot={false} />
+              {monthDoys.map((d, i) => (
+                <ReferenceLine key={i} x={d} stroke="#334155" strokeDasharray="2 4"
+                  label={{ value: MONTHS[i], fontSize: 9, fill: '#64748b', position: 'insideTopRight' }} />
+              ))}
+            </AreaChart>
+          </ResponsiveContainer>
+        </SectionCard>
+      )}
+
+      {/* Humedad anual */}
+      {hSeries.length > 0 && (
+        <SectionCard
+          title="Humedad Relativa — Variación anual promedio"
+          subtitle={`${hProfile.date_start ? fmt(hProfile.date_start) : ''} → ${hProfile.date_end ? fmt(hProfile.date_end) : ''} · Estadístico: moda diaria`}
+        >
+          <ResponsiveContainer width="100%" height={300}>
+            <AreaChart data={hSeries} margin={{ top: 4, right: 8, left: -10, bottom: 0 }}>
+              <defs>
+                <linearGradient id="hag" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%"  stopColor="#3b82f6" stopOpacity={0.2} />
+                  <stop offset="95%" stopColor="#3b82f6" stopOpacity={0} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+              <XAxis dataKey="doy" tickFormatter={fmtDoy}
+                ticks={monthDoys} tick={{ fontSize: 10, fill: '#94a3b8' }} />
+              <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} unit="%" domain={[0, 100]} />
+              <Tooltip labelFormatter={fmtDoy}
+                contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }} />
+              <Legend />
+              <Area type="monotone" dataKey="max" name="Máx"  stroke="#3b82f6" fill="none"     strokeWidth={1} opacity={0.4} dot={false} />
+              <Area type="monotone" dataKey="q75" name="Q75"  stroke="#6366f1" fill="none"     strokeWidth={1} strokeDasharray="4 2" dot={false} />
+              <Area type="monotone" dataKey="avg" name="Moda" stroke="#3b82f6" fill="url(#hag)" strokeWidth={2} dot={false} />
+              <Area type="monotone" dataKey="q25" name="Q25"  stroke="#6366f1" fill="none"     strokeWidth={1} strokeDasharray="4 2" dot={false} />
+              <Area type="monotone" dataKey="min" name="Mín"  stroke="#3b82f6" fill="none"     strokeWidth={1} opacity={0.4} dot={false} />
+              {monthDoys.map((d, i) => (
+                <ReferenceLine key={i} x={d} stroke="#334155" strokeDasharray="2 4"
+                  label={{ value: MONTHS[i], fontSize: 9, fill: '#64748b', position: 'insideTopRight' }} />
+              ))}
+            </AreaChart>
+          </ResponsiveContainer>
+        </SectionCard>
+      )}
+    </>
+  )
+}
+
+// ══════════════════════════════════════════════════════════════
+// SECTION D — T × HR combinado  (corregido: contornos + mobility)
+// ══════════════════════════════════════════════════════════════
+function SectionCombined({ stationId, stationAlt, dateFrom, dateTo }) {
+  const [data,    setData]    = useState(null)
+  const [loading, setLoading] = useState(false)
+  const [error,   setError]   = useState(null)
+  const [contour, setContour] = useState('all')  // 'all' | '90' | '95' | '99'
+
+  const load = useCallback(async () => {
+    if (!stationId) return
+    setLoading(true); setError(null)
+    try {
+      const r = await measurementsApi.combined({
+        station_id: stationId,
+        altitude:   stationAlt || 0,
+        date_from:  dateFrom,
+        date_to:    dateTo,
+      })
       setData(r)
     } catch (e) { setError(e.message) }
     finally { setLoading(false) }
@@ -420,30 +817,88 @@ function SectionCombined({ stationId, stationAlt, dateFrom, dateTo }) {
   if (error)   return <Err msg={error} />
   if (!data)   return null
 
+  // Filtrar densidad por contorno seleccionado
+  const filteredDensity = contour === 'all'
+    ? data.density
+    : data.density.filter(d => {
+        const lvl = parseInt(d.contour)
+        return !isNaN(lvl) && lvl <= parseInt(contour)
+      })
+
+  // Colores por contorno
+  const contourColor = (d) => {
+    if (d.contour === '90') return '#22c55e'
+    if (d.contour === '95') return '#f97316'
+    if (d.contour === '99') return '#6366f1'
+    return '#64748b'
+  }
+
+  // Movilidad: heatmap mes × hora de T_avg
+  const mobilityT = data.mobility ?? []
+
   return (
     <>
+      {/* Densidad T × HR con contornos */}
       {data.density.length > 0 && (
-        <SectionCard title="d.1) Distribución T × HR" subtitle={`Tiempo de humectación (T>10°C y HR>79%): ${data.humect_pct}%`}>
-          <ResponsiveContainer width="100%" height={360}>
+        <SectionCard
+          title="d.1) Distribución T × HR"
+          subtitle={`Tiempo de humectación (T>10°C y HR>79%): ${data.humect_pct}% (${data.humect_count} registros)`}
+        >
+          {/* Selector de contorno */}
+          <div style={{ display: 'flex', gap: 6, marginBottom: 14, flexWrap: 'wrap', alignItems: 'center' }}>
+            <span style={{ fontSize: 12, color: '#94a3b8', fontWeight: 600 }}>Mostrar:</span>
+            {[
+              { v: 'all', label: 'Todos',  color: '#64748b' },
+              { v: '99',  label: '99%',    color: '#6366f1' },
+              { v: '95',  label: '95%',    color: '#f97316' },
+              { v: '90',  label: '90%',    color: '#22c55e' },
+            ].map(({ v, label, color }) => (
+              <button key={v} onClick={() => setContour(v)} style={{
+                padding: '3px 12px', borderRadius: 20, border: `1px solid ${contour === v ? color : '#334155'}`,
+                fontSize: 12, cursor: 'pointer',
+                background: contour === v ? `${color}30` : 'transparent',
+                color:      contour === v ? color        : '#94a3b8',
+              }}>{label}</button>
+            ))}
+          </div>
+
+          <ResponsiveContainer width="100%" height={380}>
             <ScatterChart margin={{ top: 8, right: 16, left: -10, bottom: 20 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
-              <XAxis dataKey="T"  name="Temperatura" unit="°C" type="number" tick={{ fontSize: 10, fill: '#94a3b8' }}
+              <XAxis dataKey="T"  name="Temperatura" unit="°C"  type="number" tick={{ fontSize: 10, fill: '#94a3b8' }}
                 label={{ value: 'T (°C)', position: 'insideBottom', offset: -8, fontSize: 11, fill: '#94a3b8' }} />
-              <YAxis dataKey="HR" name="Humedad" unit="%" type="number" domain={[0,100]} tick={{ fontSize: 10, fill: '#94a3b8' }}
+              <YAxis dataKey="HR" name="Humedad"     unit="%" type="number" domain={[0,100]} tick={{ fontSize: 10, fill: '#94a3b8' }}
                 label={{ value: 'HR (%)', angle: -90, position: 'insideLeft', fontSize: 11, fill: '#94a3b8' }} />
               <Tooltip cursor={{ strokeDasharray: '3 3' }}
                 contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }}
                 formatter={(v, n) => [typeof v === 'number' ? v.toFixed(2) : v, n]} />
-              <ReferenceLine x={10} stroke="#f97316" strokeDasharray="4 2" label={{ value: 'T=10°C', fontSize: 9, fill: '#f97316' }} />
-              <ReferenceLine y={79} stroke="#f97316" strokeDasharray="4 2" label={{ value: 'HR=79%', fontSize: 9, fill: '#f97316', position: 'insideTopRight' }} />
-              <Scatter data={data.density} name="Densidad" fill="#6366f1" fillOpacity={0.6} />
+              <ReferenceLine x={10} stroke="#f97316" strokeDasharray="4 2"
+                label={{ value: 'T=10°C', fontSize: 9, fill: '#f97316' }} />
+              <ReferenceLine y={79} stroke="#f97316" strokeDasharray="4 2"
+                label={{ value: 'HR=79%', fontSize: 9, fill: '#f97316', position: 'insideTopRight' }} />
+              <Scatter data={filteredDensity} name="Densidad" fillOpacity={0.7}>
+                {filteredDensity.map((d, i) => (
+                  <Cell key={i} fill={contourColor(d)} />
+                ))}
+              </Scatter>
             </ScatterChart>
           </ResponsiveContainer>
+
+          {/* Leyenda de contornos */}
+          <div style={{ display: 'flex', gap: 14, marginTop: 8, flexWrap: 'wrap', fontSize: 11 }}>
+            {[['90', '#22c55e', '90% más denso'], ['95', '#f97316', '90–95%'], ['99', '#6366f1', '95–99%'], ['out', '#64748b', 'Fuera del 99%']].map(([lvl, col, lbl]) => (
+              <span key={lvl} style={{ display: 'flex', alignItems: 'center', gap: 4, color: '#94a3b8' }}>
+                <span style={{ width: 10, height: 10, borderRadius: 2, background: col, display: 'inline-block' }} />
+                {lbl}
+              </span>
+            ))}
+          </div>
         </SectionCard>
       )}
 
+      {/* Humedad Absoluta */}
       {data.habs_monthly.length > 0 && (
-        <SectionCard title="d.2) Humedad Absoluta (H abs)" subtitle={`Altitud: ${stationAlt || 0} m s.n.m.`}>
+        <SectionCard title="d.2) Humedad Absoluta mensual" subtitle={`Altitud: ${stationAlt || 0} m s.n.m.`}>
           <div style={{ marginBottom: 10, fontSize: 11, color: '#64748b', fontFamily: 'monospace' }}>
             H_abs = (18000/29) × (HR/100 × P_sat) / (P_tot − HR/100 × P_sat)
           </div>
@@ -452,7 +907,7 @@ function SectionCombined({ stationId, stationAlt, dateFrom, dateTo }) {
               <defs>
                 <linearGradient id="habsg" x1="0" y1="0" x2="0" y2="1">
                   <stop offset="5%"  stopColor="#10b981" stopOpacity={0.3} />
-                  <stop offset="95%" stopColor="#10b981" stopOpacity={0}   />
+                  <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
                 </linearGradient>
               </defs>
               <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
@@ -465,6 +920,7 @@ function SectionCombined({ stationId, stationAlt, dateFrom, dateTo }) {
         </SectionCard>
       )}
 
+      {/* Gráfico psicrométrico */}
       {data.scatter.length > 0 && (
         <SectionCard title="d.3) Gráfico psicrométrico (T vs H abs)">
           <ResponsiveContainer width="100%" height={320}>
@@ -481,11 +937,78 @@ function SectionCombined({ stationId, stationAlt, dateFrom, dateTo }) {
           </ResponsiveContainer>
         </SectionCard>
       )}
+
+      {/* Movilidad del flujo — mapa de calor mes × hora de T */}
+      {mobilityT.length > 0 && (
+        <SectionCard
+          title="d.4) Movilidad del flujo T × HR durante el año"
+          subtitle="Temperatura promedio por mes y hora del día — muestra cuándo ocurren los máximos"
+        >
+          {(() => {
+            const matT  = Array.from({ length: 12 }, () => Array(24).fill(null))
+            const matHR = Array.from({ length: 12 }, () => Array(24).fill(null))
+            mobilityT.forEach(({ mes, hora, T_avg, HR_avg }) => {
+              matT [mes-1][hora] = T_avg
+              matHR[mes-1][hora] = HR_avg
+            })
+            const allT  = mobilityT.map(d => d.T_avg)
+            const allHR = mobilityT.map(d => d.HR_avg)
+            const tMin = Math.min(...allT),  tMax = Math.max(...allT)
+            const hMin = Math.min(...allHR), hMax = Math.max(...allHR)
+
+            return (
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                {[
+                  { label: 'T promedio (°C)', mat: matT,  min: tMin, max: tMax, type: 'TEMP', unit: '°C' },
+                  { label: 'HR promedio (%)', mat: matHR, min: hMin, max: hMax, type: 'HR',   unit: '%'  },
+                ].map(({ label, mat, min, max, type, unit }) => (
+                  <div key={label}>
+                    <div style={{ fontSize: 12, color: '#94a3b8', marginBottom: 6, fontWeight: 600 }}>{label}</div>
+                    <div style={{ overflowX: 'auto' }}>
+                      <table style={{ borderCollapse: 'collapse', fontSize: 9 }}>
+                        <thead>
+                          <tr>
+                            <th style={{ padding: '2px 6px', color: '#64748b', textAlign: 'left' }}>M\H</th>
+                            {HOURS.map(h => <th key={h} style={{ padding: '1px', color: '#64748b', minWidth: 22 }}>{String(h).padStart(2,'0')}</th>)}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {MONTHS.map((m, mi) => (
+                            <tr key={m}>
+                              <td style={{ padding: '1px 6px', color: '#94a3b8', fontWeight: 600 }}>{m}</td>
+                              {HOURS.map(h => {
+                                const v = mat[mi][h]
+                                return (
+                                  <td key={h}
+                                    title={v != null ? `${m} ${String(h).padStart(2,'0')}:00 → ${v}${unit}` : 'Sin dato'}
+                                    style={{ background: heatColor(v, min, max, type), height: 18, borderRadius: 1 }}
+                                  />
+                                )
+                              })}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    <div style={{ display: 'flex', gap: 6, marginTop: 6, fontSize: 10, color: '#64748b', alignItems: 'center' }}>
+                      <span>{min?.toFixed(1)}{unit}</span>
+                      <div style={{ flex: 1, height: 6, borderRadius: 3, background: type === 'TEMP' ? 'linear-gradient(to right,#3b82f6,#facc15,#ef4444)' : 'linear-gradient(to right,#f0f9ff,#1d4ed8)' }} />
+                      <span>{max?.toFixed(1)}{unit}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )
+          })()}
+        </SectionCard>
+      )}
     </>
   )
 }
 
-// ── Página principal ──────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+// PÁGINA PRINCIPAL
+// ══════════════════════════════════════════════════════════════
 export default function Analysis() {
   const [stations,   setStations]   = useState([])
   const [stationId,  setStationId]  = useState('')
@@ -517,7 +1040,7 @@ export default function Analysis() {
     <div style={{ padding: '2rem 2.5rem', maxWidth: 1200 }}>
       <div style={{ marginBottom: '1.5rem' }}>
         <h1 style={{ margin: '0 0 4px', fontSize: '1.75rem', fontWeight: 800, color: '#f1f5f9' }}>Análisis meteorológico</h1>
-        <p style={{ margin: 0, fontSize: '0.875rem', color: '#94a3b8' }}>Visualización, FDP, isolíneas y análisis combinado T×HR</p>
+        <p style={{ margin: 0, fontSize: '0.875rem', color: '#94a3b8' }}>Visualización · FDP · Isolíneas · Perfil diario y anual · Análisis combinado T×HR</p>
       </div>
 
       {/* Filtros */}
@@ -548,7 +1071,12 @@ export default function Analysis() {
         <button
           onClick={() => setQueried(true)}
           disabled={!stationId}
-          style={{ padding: '8px 20px', borderRadius: 8, border: 'none', fontWeight: 600, fontSize: 13, cursor: stationId ? 'pointer' : 'not-allowed', background: stationId ? '#22c55e' : '#334155', color: stationId ? '#000' : '#64748b' }}>
+          style={{
+            padding: '8px 20px', borderRadius: 8, border: 'none', fontWeight: 600, fontSize: 13,
+            cursor: stationId ? 'pointer' : 'not-allowed',
+            background: stationId ? '#22c55e' : '#334155',
+            color: stationId ? '#000' : '#64748b',
+          }}>
           Consultar
         </button>
       </div>
@@ -561,7 +1089,7 @@ export default function Analysis() {
       ) : (
         <>
           {/* Tabs */}
-          <div style={{ display: 'flex', gap: 4, marginBottom: 20, flexWrap: 'wrap', borderBottom: '1px solid #1e293b', paddingBottom: 0 }}>
+          <div style={{ display: 'flex', gap: 2, marginBottom: 20, flexWrap: 'wrap', borderBottom: '1px solid #1e293b', paddingBottom: 0 }}>
             {TABS.map(t => (
               <button key={t.id} onClick={() => setActiveTab(t.id)} style={{
                 padding: '10px 16px', fontSize: 13, fontWeight: 500, cursor: 'pointer',
@@ -575,10 +1103,12 @@ export default function Analysis() {
             ))}
           </div>
 
-          {activeTab === 'overview' && <SectionOverview stationId={stationId} dateFrom={dateFrom || undefined} dateTo={dateTo || undefined} />}
-          {activeTab === 'fdp'      && <SectionFDP      stationId={stationId} dateFrom={dateFrom || undefined} dateTo={dateTo || undefined} />}
-          {activeTab === 'isolines' && <SectionIsolines stationId={stationId} dateFrom={dateFrom || undefined} dateTo={dateTo || undefined} />}
-          {activeTab === 'combined' && <SectionCombined stationId={stationId} stationAlt={stationAlt} dateFrom={dateFrom || undefined} dateTo={dateTo || undefined} />}
+          {activeTab === 'overview'       && <SectionOverview      stationId={stationId} dateFrom={dateFrom || undefined} dateTo={dateTo || undefined} />}
+          {activeTab === 'fdp'            && <SectionFDP           stationId={stationId} dateFrom={dateFrom || undefined} dateTo={dateTo || undefined} />}
+          {activeTab === 'isolines'       && <SectionIsolines      stationId={stationId} dateFrom={dateFrom || undefined} dateTo={dateTo || undefined} />}
+          {activeTab === 'daily-profile'  && <SectionDailyProfile  stationId={stationId} dateFrom={dateFrom || undefined} dateTo={dateTo || undefined} />}
+          {activeTab === 'annual-profile' && <SectionAnnualProfile stationId={stationId} dateFrom={dateFrom || undefined} dateTo={dateTo || undefined} />}
+          {activeTab === 'combined'       && <SectionCombined      stationId={stationId} stationAlt={stationAlt} dateFrom={dateFrom || undefined} dateTo={dateTo || undefined} />}
         </>
       )}
     </div>
