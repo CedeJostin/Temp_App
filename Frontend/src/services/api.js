@@ -47,8 +47,17 @@ export const measurementsApi = {
   stats: (p = {}) =>
     req(`/measurements/stats?${new URLSearchParams(clean(p))}`),
 
+  statsSummaryTable: (p = {}) =>                                          // ← nuevo
+    req(`/measurements/stats/summary-table?${new URLSearchParams(clean(p))}`),
+
   heatmap: (p = {}) =>
     req(`/measurements/heatmap?${new URLSearchParams(clean(p))}`),
+
+  dailyProfile: (p = {}) =>                                               // ← nuevo
+    req(`/measurements/daily-profile?${new URLSearchParams(clean(p))}`),
+
+  annualProfile: (p = {}) =>                                              // ← nuevo
+    req(`/measurements/annual-profile?${new URLSearchParams(clean(p))}`),
 
   combined: (p = {}) =>
     req(`/measurements/combined?${new URLSearchParams(clean(p))}`),

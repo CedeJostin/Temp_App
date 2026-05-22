@@ -8,6 +8,7 @@ Endpoints disponibles:
   GET    /measurements/summary       Resumen estadístico por estación + variable
   GET    /measurements/by-date       Agrupado por día / mes / año
   GET    /measurements/stats         Estadísticos + FDP + Gaussianas (T) o Beta (HR)
+  GET    /measurements/stats/summary-table  Tabla exportable de ajustes por estación (b.1)
   GET    /measurements/heatmap       Matriz mes × hora (o mes × semana) para mapa de calor
   GET    /measurements/daily-profile Perfil diario promedio por mes (c.2)
   GET    /measurements/annual-profile Perfil anual promedio (c.3)
@@ -99,15 +100,31 @@ def _apply_date_filters(q, date_from, date_to):
     return q
 
 
+def _completitud_color(pct: float) -> str:
+    """
+    Retorna código de color según rangos del instructivo:
+    [100, 98) → verde
+    [98,  95) → azul
+    [95,  90) → amarillo
+    [90,  85) → naranja
+    [85, -)   → rojo
+    """
+    if pct >= 98:  return "green"
+    if pct >= 95:  return "blue"
+    if pct >= 90:  return "yellow"
+    if pct >= 85:  return "orange"
+    return "red"
+
+
 # ═════════════════════════════════════════════════════════════
-# AJUSTE GAUSSIANO (para T)  ← CORREGIDO: usa scipy.optimize
+# AJUSTE GAUSSIANO (para T)
 # ═════════════════════════════════════════════════════════════
 
 def _fit_gaussian_components(fdp: list[dict], n_components: int = 2) -> tuple[list[dict], float | None, float | None, list[dict]]:
     """
     Ajusta n_components gaussianas a la FDP de T usando scipy.optimize (SLSQP).
 
-    Sistema de 2*n_components + n_components variables:
+    Sistema de 3*n_components variables:
       params = [mu_0, sigma_0, w_0,  mu_1, sigma_1, w_1, ...]
 
     Criterios del instructivo:
@@ -120,7 +137,7 @@ def _fit_gaussian_components(fdp: list[dict], n_components: int = 2) -> tuple[li
       gaussians : lista de dicts {mu, sigma, w}
       r2        : coeficiente de determinación
       mse       : error medio cuadrático
-      fdp_out   : fdp con columna "model" agregada
+      fdp_out   : fdp con columnas "model" y "error_range" agregadas
     """
     import numpy as np
     from scipy.signal import find_peaks
@@ -139,7 +156,6 @@ def _fit_gaussian_components(fdp: list[dict], n_components: int = 2) -> tuple[li
     p0 = []
     for i, idx in enumerate(peaks_idx):
         mu    = float(x_arr[idx])
-        # Estimar sigma por distancia al siguiente pico o borde
         if i + 1 < len(peaks_idx):
             sigma = float(abs(x_arr[peaks_idx[i + 1]] - mu) / 2.5)
         else:
@@ -172,7 +188,6 @@ def _fit_gaussian_components(fdp: list[dict], n_components: int = 2) -> tuple[li
     # ── Restricción: suma(pesos) = 1 ─────────────────────────
     constraints = [{"type": "eq", "fun": lambda p: np.sum(p[2::3]) - 1.0}]
 
-    # Bounds: mu libre, sigma > 0.1, w in (0, 1)
     x_min, x_max = float(x_arr.min()), float(x_arr.max())
     bounds = [(x_min - 5, x_max + 5), (0.1, 20.0), (0.001, 1.0)] * n_components
 
@@ -203,7 +218,6 @@ def _fit_gaussian_components(fdp: list[dict], n_components: int = 2) -> tuple[li
         })
 
     # ── Métricas de ajuste ────────────────────────────────────
-    # Reconstruir modelo con pesos normalizados
     params_norm = params_opt.copy()
     for i in range(n_components):
         params_norm[3*i + 2] = float(weights[i])
@@ -215,7 +229,7 @@ def _fit_gaussian_components(fdp: list[dict], n_components: int = 2) -> tuple[li
     ss_res = float(np.sum((y_real - y_model) ** 2))
     r2     = round(1 - ss_res / ss_tot, 4) if ss_tot > 0 else None
 
-    # Error punto a punto (rango ±1E-3)
+    # Error punto a punto (rango ±1E-3) — se expone en cada punto del FDP
     fdp_out = [
         {
             **d,
@@ -238,6 +252,9 @@ def _fit_beta_components(fdp: list[dict], n_components: int = 2) -> tuple[list[d
 
     HR está en [0, 100] → normalizamos a [0, 1] para scipy.stats.beta,
     luego devolvemos moda, varianza y peso en la escala original (%).
+
+    n_components es configurable por query param (el instructivo indica que
+    para clima tropical puede haber varias curvas Beta).
 
     Retorna:
       betas   : lista de dicts {alpha, beta, mode, variance, w}
@@ -352,6 +369,28 @@ def _fit_beta_components(fdp: list[dict], n_components: int = 2) -> tuple[list[d
     ]
 
     return betas_out, r2, round(mse, 8), fdp_out
+
+
+# ─── Función para verificar umbrales del instructivo ─────────
+def _quality_flags(mse, r2, fdp_data):
+    """
+    Verifica los 3 criterios de ajuste del instructivo:
+      - EMC  ≤ 1E-5
+      - R²   ≥ 0.95
+      - Error punto a punto en rango ±1E-3
+      - Suma de pesos = 1 (se verifica externamente)
+    """
+    errors = [abs(d.get("error_range", 0)) for d in fdp_data if "error_range" in d]
+    max_err = max(errors) if errors else None
+    return {
+        "mse_ok":           mse is not None and mse <= 1e-5,
+        "r2_ok":            r2  is not None and r2  >= 0.95,
+        "error_range_ok":   max_err is not None and max_err <= 1e-3,
+        "max_error_range":  round(max_err, 6) if max_err is not None else None,
+        "mse_target":       "≤ 1E-5",
+        "r2_target":        "≥ 0.95",
+        "error_target":     "± 1E-3",
+    }
 
 
 # ═════════════════════════════════════════════════════════════
@@ -517,8 +556,6 @@ def get_by_date(
 
 # ═════════════════════════════════════════════════════════════
 # GET /stats  — estadísticos + FDP + Gaussianas (T) o Beta (HR)
-# CORREGIDO: gaussianas usan optimize; n_components configurable;
-#            EMC y error_range_ok expuestos en respuesta
 # ═════════════════════════════════════════════════════════════
 
 @router.get("/stats")
@@ -527,7 +564,8 @@ def get_stats(
     variable_code: str           = Query(...),
     date_from:     Optional[str] = Query(None),
     date_to:       Optional[str] = Query(None),
-    n_components:  int           = Query(2, ge=1, le=6, description="Número de componentes gaussianas/beta"),
+    n_components:  int           = Query(2, ge=1, le=6,
+                                         description="Número de componentes gaussianas/beta"),
     db: Session = Depends(get_db),
 ):
     import numpy as np
@@ -568,7 +606,14 @@ def get_stats(
     unique, counts = np.unique(bins_mode, return_counts=True)
     mode = float(unique[np.argmax(counts)])
 
-    anomalies_count = int(np.sum(np.abs(values - mean) > 3 * std))
+    # Anomalías: |valor - media| > 3σ — se marca cada fila, no solo se cuenta
+    anomaly_threshold = 3 * std
+    anomalies_count = int(np.sum(np.abs(values - mean) > anomaly_threshold))
+    anomaly_values  = [
+        round(float(v), 4)
+        for v in values
+        if abs(v - mean) > anomaly_threshold
+    ]
 
     # ── FDP ───────────────────────────────────────────────────
     paso = 0.1 if is_temp else 1.0
@@ -586,28 +631,15 @@ def get_stats(
     date_end      = rows[-1].measured_at
     horas_totales = max(int((date_end - date_start).total_seconds() / 3600) + 1, 1)
     completitud   = round(n / horas_totales * 100, 2)
-
-    # ─── Función para verificar umbrales del instructivo ──────
-    def _quality_flags(mse, r2, fdp_data):
-        errors = [abs(d.get("error_range", 0)) for d in fdp_data if "error_range" in d]
-        max_err = max(errors) if errors else None
-        return {
-            "mse_ok":         mse is not None and mse <= 1e-5,
-            "r2_ok":          r2  is not None and r2  >= 0.95,
-            "error_range_ok": max_err is not None and max_err <= 1e-3,
-            "mse_target":     "≤ 1E-5",
-            "r2_target":      "≥ 0.95",
-            "error_target":   "± 1E-3",
-        }
+    completitud_color = _completitud_color(completitud)
 
     # ═══════════════════════════════════════════════════════════
-    # RAMA HR — ajuste Beta
+    # RAMA HR — ajuste Beta (n_components configurable)
     # ═══════════════════════════════════════════════════════════
     if is_hr:
         betas, r2, mse, fdp_fitted = ([], None, None, fdp) if len(fdp) <= 4 else \
             _fit_beta_components(fdp, n_components=n_components)
 
-        # Verificar suma de pesos
         w_sum  = round(sum(b["w"] for b in betas), 4)
         w_ok   = abs(w_sum - 1.0) < 0.01
 
@@ -616,35 +648,38 @@ def get_stats(
         quality["weights_sum_ok"] = w_ok
 
         return {
-            "n":               n,
-            "mean":            round(mean, 4),
-            "std":             round(std,  4),
-            "min":             round(mn,   4),
-            "max":             round(mx,   4),
-            "q25":             round(q25,  4),
-            "q50":             round(q50,  4),
-            "q75":             round(q75,  4),
-            "mode":            round(mode, 4),
-            "completitud_pct": completitud,
-            "anomalies_count": anomalies_count,
-            "date_start":      str(date_start),
-            "date_end":        str(date_end),
-            "distribution":    "beta",
-            "fdp":             fdp_fitted,
-            "betas":           betas,
-            "gaussians":       [],
-            "r2":              r2,
-            "mse":             mse,
-            "quality":         quality,
+            "n":                  n,
+            "mean":               round(mean, 4),
+            "std":                round(std,  4),
+            "min":                round(mn,   4),
+            "max":                round(mx,   4),
+            "q25":                round(q25,  4),
+            "q50":                round(q50,  4),
+            "q75":                round(q75,  4),
+            "mode":               round(mode, 4),
+            "completitud_pct":    completitud,
+            "completitud_color":  completitud_color,
+            "anomalies_count":    anomalies_count,
+            "anomaly_values":     anomaly_values[:50],  # primeros 50 para no sobrecargar
+            "anomaly_threshold":  round(anomaly_threshold, 4),
+            "date_start":         str(date_start),
+            "date_end":           str(date_end),
+            "distribution":       "beta",
+            "n_components":       n_components,
+            "fdp":                fdp_fitted,
+            "betas":              betas,
+            "gaussians":          [],
+            "r2":                 r2,
+            "mse":                mse,
+            "quality":            quality,
         }
 
     # ═══════════════════════════════════════════════════════════
-    # RAMA TEMP — ajuste Gaussiano CORREGIDO (scipy.optimize)
+    # RAMA TEMP — ajuste Gaussiano (scipy.optimize SLSQP)
     # ═══════════════════════════════════════════════════════════
     gaussians, r2, mse, fdp_fitted = ([], None, None, fdp) if len(fdp) <= 4 else \
         _fit_gaussian_components(fdp, n_components=n_components)
 
-    # Verificar suma de pesos
     w_sum = round(sum(g["w"] for g in gaussians), 4)
     w_ok  = abs(w_sum - 1.0) < 0.01
 
@@ -653,32 +688,142 @@ def get_stats(
     quality["weights_sum_ok"] = w_ok
 
     return {
-        "n":               n,
-        "mean":            round(mean, 4),
-        "std":             round(std,  4),
-        "min":             round(mn,   4),
-        "max":             round(mx,   4),
-        "q25":             round(q25,  4),
-        "q50":             round(q50,  4),
-        "q75":             round(q75,  4),
-        "mode":            round(mode, 4),
-        "completitud_pct": completitud,
-        "anomalies_count": anomalies_count,
-        "date_start":      str(date_start),
-        "date_end":        str(date_end),
-        "distribution":    "gaussian",
-        "fdp":             fdp_fitted,
-        "gaussians":       gaussians,
-        "betas":           [],
-        "r2":              r2,
-        "mse":             mse,
-        "quality":         quality,
+        "n":                  n,
+        "mean":               round(mean, 4),
+        "std":                round(std,  4),
+        "min":                round(mn,   4),
+        "max":                round(mx,   4),
+        "q25":                round(q25,  4),
+        "q50":                round(q50,  4),
+        "q75":                round(q75,  4),
+        "mode":               round(mode, 4),
+        "completitud_pct":    completitud,
+        "completitud_color":  completitud_color,
+        "anomalies_count":    anomalies_count,
+        "anomaly_values":     anomaly_values[:50],
+        "anomaly_threshold":  round(anomaly_threshold, 4),
+        "date_start":         str(date_start),
+        "date_end":           str(date_end),
+        "distribution":       "gaussian",
+        "n_components":       n_components,
+        "fdp":                fdp_fitted,
+        "gaussians":          gaussians,
+        "betas":              [],
+        "r2":                 r2,
+        "mse":                mse,
+        "quality":            quality,
+    }
+
+
+# ═════════════════════════════════════════════════════════════
+# GET /stats/summary-table  — Tabla exportable b.1 del instructivo
+# Columnas: estación, coordenadas, altura, período, μ/σ/w (gaussianas)
+#           o moda/varianza/w (Beta), EMC, R²
+# ═════════════════════════════════════════════════════════════
+
+@router.get("/stats/summary-table")
+def get_stats_summary_table(
+    variable_code: str           = Query(..., description="TEMP o HR"),
+    date_from:     Optional[str] = Query(None),
+    date_to:       Optional[str] = Query(None),
+    n_components:  int           = Query(2, ge=1, le=6),
+    db: Session = Depends(get_db),
+):
+    """
+    Genera la tabla resumen del instructivo (b.1) para todas las estaciones.
+    Para TEMP: número, coordenadas, altura, período, μ/σ/w de cada gaussiana, EMC, R².
+    Para HR:   número, coordenadas, altura, período, moda/varianza/w de cada Beta, EMC, R².
+
+    Útil para exportar a Excel/PDF.
+    """
+    import numpy as np
+
+    stations = db.query(Station).order_by(Station.station_code).all()
+    vc = variable_code.strip().upper()
+    is_hr = vc == "HR"
+
+    rows_out = []
+    for station in stations:
+        q = (
+            db.query(Measurement)
+            .join(Measurement.variable)
+            .filter(Measurement.station_id == station.id)
+            .filter(func.upper(Variable.code) == vc)
+        )
+        q = _apply_date_filters(q, date_from, date_to)
+        meas = q.order_by(Measurement.measured_at.asc()).all()
+
+        if not meas:
+            continue
+
+        values = np.array([float(r.value) for r in meas])
+        values = values[~np.isnan(values)]
+        if len(values) < 10:
+            continue
+
+        n    = len(values)
+        mean_v = float(np.mean(values))
+        std_v  = float(np.std(values))
+        mn_v   = float(np.min(values))
+        mx_v   = float(np.max(values))
+
+        paso = 0.1 if not is_hr else 1.0
+        bins = np.arange(mn_v, mx_v + paso, paso)
+        counts_hist, edges = np.histogram(values, bins=bins, density=True)
+        centers = ((edges[:-1] + edges[1:]) / 2).round(2)
+        fdp = [{"x": float(c), "freq": round(float(f) * paso, 6)}
+               for c, f in zip(centers, counts_hist)]
+
+        date_start = meas[0].measured_at
+        date_end   = meas[-1].measured_at
+        horas_totales = max(int((date_end - date_start).total_seconds() / 3600) + 1, 1)
+        completitud   = round(n / horas_totales * 100, 2)
+
+        row = {
+            "station_code":      station.station_code,
+            "station_name":      station.name,
+            "latitude":          float(station.latitude)         if station.latitude         else None,
+            "longitude":         float(station.longitude)        if station.longitude        else None,
+            "altitude_m":        float(station.altitude_meters)  if station.altitude_meters  else None,
+            "date_start":        str(date_start),
+            "date_end":          str(date_end),
+            "n":                 n,
+            "completitud_pct":   completitud,
+            "completitud_color": _completitud_color(completitud),
+            "mean":              round(mean_v, 4),
+            "std":               round(std_v,  4),
+        }
+
+        if len(fdp) <= 4:
+            row.update({"r2": None, "mse": None, "components": [], "quality": None})
+        elif is_hr:
+            betas, r2, mse, fdp_fit = _fit_beta_components(fdp, n_components=n_components)
+            quality = _quality_flags(mse, r2, fdp_fit)
+            w_sum   = round(sum(b["w"] for b in betas), 4)
+            quality["weights_sum"]    = w_sum
+            quality["weights_sum_ok"] = abs(w_sum - 1.0) < 0.01
+            row.update({"r2": r2, "mse": mse, "components": betas, "quality": quality,
+                        "distribution": "beta"})
+        else:
+            gaussians, r2, mse, fdp_fit = _fit_gaussian_components(fdp, n_components=n_components)
+            quality = _quality_flags(mse, r2, fdp_fit)
+            w_sum   = round(sum(g["w"] for g in gaussians), 4)
+            quality["weights_sum"]    = w_sum
+            quality["weights_sum_ok"] = abs(w_sum - 1.0) < 0.01
+            row.update({"r2": r2, "mse": mse, "components": gaussians, "quality": quality,
+                        "distribution": "gaussian"})
+
+        rows_out.append(row)
+
+    return {
+        "variable_code": vc,
+        "n_components":  n_components,
+        "stations":      rows_out,
     }
 
 
 # ═════════════════════════════════════════════════════════════
 # GET /heatmap  — matriz mes × hora  O  mes × semana
-# CORREGIDO: agrega parámetro group_by=hour|week
 # ═════════════════════════════════════════════════════════════
 
 @router.get("/heatmap")
@@ -686,7 +831,7 @@ def get_heatmap(
     station_id:    str           = Query(...),
     variable_code: str           = Query(...),
     group_by:      str           = Query("hour", regex="^(hour|week)$",
-                                         description="Eje secundario: hora del día (hour) o semana del año (week)"),
+                                         description="Eje secundario: hora del día (hour) o semana del mes (week)"),
     date_from:     Optional[str] = Query(None),
     date_to:       Optional[str] = Query(None),
     db: Session = Depends(get_db),
@@ -713,7 +858,7 @@ def get_heatmap(
     df["mes"] = df["measured_at"].dt.month
 
     if group_by == "week":
-        # Semana dentro del mes (1-5) para eje secundario
+        # Semana dentro del mes (1-5)
         df["eje"] = ((df["measured_at"].dt.day - 1) // 7 + 1)
         eje_label = "semana_mes"
         eje_range = list(range(1, 6))
@@ -742,9 +887,6 @@ def get_heatmap(
 
 # ═════════════════════════════════════════════════════════════
 # GET /daily-profile  — c.2) Variación diaria promedio por mes
-# NUEVO: promedios horarios desagregados por mes
-#   Retorna para cada mes (0=anual, 1-12=mensual):
-#     hora, avg, min, max, mode, q25, q75
 # ═════════════════════════════════════════════════════════════
 
 @router.get("/daily-profile")
@@ -792,7 +934,6 @@ def get_daily_profile(
     df["hora"] = df["measured_at"].dt.hour
 
     def _mode(series):
-        """Moda con resolución según cifras significativas de la variable."""
         vals = series.dropna()
         if len(vals) == 0:
             return None
@@ -801,7 +942,6 @@ def get_daily_profile(
         return round(float(u[np.argmax(c)]), 2)
 
     def _profile(subset: pd.DataFrame) -> list[dict]:
-        """Calcula perfil de 24 horas para un subconjunto de datos."""
         result = []
         for h in range(24):
             grp = subset[subset["hora"] == h]["value"]
@@ -811,12 +951,12 @@ def get_daily_profile(
                 continue
             result.append({
                 "hora": h,
-                "avg":  round(float(grp.mean()),                      3),
-                "min":  round(float(grp.min()),                       3),
-                "max":  round(float(grp.max()),                       3),
+                "avg":  round(float(grp.mean()),           3),
+                "min":  round(float(grp.min()),            3),
+                "max":  round(float(grp.max()),            3),
                 "mode": _mode(grp),
-                "q25":  round(float(grp.quantile(0.25)),              3),
-                "q75":  round(float(grp.quantile(0.75)),              3),
+                "q25":  round(float(grp.quantile(0.25)),   3),
+                "q75":  round(float(grp.quantile(0.75)),   3),
             })
         return result
 
@@ -833,9 +973,6 @@ def get_daily_profile(
 
 # ═════════════════════════════════════════════════════════════
 # GET /annual-profile  — c.3) Variación anual promedio
-# NUEVO: estadísticos diarios a lo largo de todo el período
-#   T  → promedio de medias diarias
-#   HR → promedio de modas diarias
 # ═════════════════════════════════════════════════════════════
 
 @router.get("/annual-profile")
@@ -853,7 +990,6 @@ def get_annual_profile(
     Para HR → moda diaria (y bandas) a lo largo del año
 
     El eje X es el día del año (1-366), promediado sobre todos los años del período.
-    Retorna serie de 366 puntos.
     """
     import numpy as np
     import pandas as pd
@@ -888,17 +1024,14 @@ def get_annual_profile(
         u, c = np.unique(bins, return_counts=True)
         return round(float(u[np.argmax(c)]), 2)
 
-    # Primero calcular estadístico diario (media para T, moda para HR) por día calendario
+    # Estadístico diario por día calendario
     daily_records = []
     for date, grp in df.groupby("date"):
         vals = grp["value"].dropna().values
         if len(vals) == 0:
             continue
         doy = grp["doy"].iloc[0]
-        if is_hr:
-            primary = _mode_val(vals)
-        else:
-            primary = round(float(np.mean(vals)), 3)
+        primary = _mode_val(vals) if is_hr else round(float(np.mean(vals)), 3)
         daily_records.append({
             "doy":     doy,
             "primary": primary,
@@ -910,7 +1043,7 @@ def get_annual_profile(
 
     daily_df = pd.DataFrame(daily_records)
 
-    # Luego promediar por día del año (doy) sobre todos los años
+    # Promediar por día del año sobre todos los años
     result = []
     for doy in range(1, 367):
         subset = daily_df[daily_df["doy"] == doy]
@@ -927,12 +1060,12 @@ def get_annual_profile(
         })
 
     return {
-        "variable_code":    variable_code.strip().upper(),
-        "is_hr":            is_hr,
-        "primary_stat":     "mode" if is_hr else "mean",
-        "series":           result,
-        "date_start":       str(rows[0].measured_at),
-        "date_end":         str(rows[-1].measured_at),
+        "variable_code": variable_code.strip().upper(),
+        "is_hr":         is_hr,
+        "primary_stat":  "mode" if is_hr else "mean",
+        "series":        result,
+        "date_start":    str(rows[0].measured_at),
+        "date_end":      str(rows[-1].measured_at),
     }
 
 
@@ -995,7 +1128,8 @@ def get_combined(
     df = pd.DataFrame(joined)
     df["measured_at"] = pd.to_datetime(df["measured_at"])
 
-    # Densidad T×HR (bins configurables: T±0.5°C, HR±2.5%)
+    # ── Densidad T×HR con bins configurables ─────────────────
+    # T en enteros (±0.5°C), HR en bins de 5% (±2.5%)
     df["T_bin"]  = (df["T"]  / 1).round() * 1
     df["HR_bin"] = (df["HR"] / 5).round() * 5
     density_raw = (
@@ -1005,13 +1139,13 @@ def get_combined(
     total_pts = len(df)
     density_raw["pct"] = (density_raw["count"] / total_pts * 100).round(3)
 
-    # Umbrales de contorno: 90%, 95%, 99% (densidad acumulada desde el centro)
+    # ── Contornos al 90/95/99% (densidad acumulada desde el centro) ──
     density_sorted = density_raw.sort_values("count", ascending=False).copy()
     density_sorted["cum_pct"] = density_sorted["count"].cumsum() / total_pts * 100
     density_raw_merged = density_raw.merge(
         density_sorted[["T", "HR", "cum_pct"]], on=["T", "HR"], how="left"
     )
-    # Asignar contorno: puntos dentro del X% más denso
+
     def _contour_level(cum):
         if cum <= 90:  return "90"
         if cum <= 95:  return "95"
@@ -1021,12 +1155,13 @@ def get_combined(
     density_raw_merged["contour"] = density_raw_merged["cum_pct"].apply(_contour_level)
     density = density_raw_merged.to_dict(orient="records")
 
-    # Tiempo de humectación
+    # ── Tiempo de humectación (T>10°C y HR>79%) ──────────────
     humect_mask  = (df["T"] > 10) & (df["HR"] > 79)
     humect_count = int(humect_mask.sum())
     humect_pct   = round(humect_count / total_pts * 100, 2)
 
-    # Movilidad del flujo: distribución horaria de máximos T y HR por mes
+    # ── Movilidad del flujo: distribución horaria T y HR por mes ──
+    # Establece cuándo ocurren los máximos en el año (instructivo d.1)
     mobility = []
     for mes in range(1, 13):
         sub = df[df["mes"] == mes]
@@ -1045,7 +1180,7 @@ def get_combined(
                 "HR_max": round(float(h_sub["HR"].max()),  2),
             })
 
-    # Serie mensual H_abs
+    # ── Serie mensual H_abs ───────────────────────────────────
     df_habs = df.dropna(subset=["habs"]).copy()
     df_habs["period"] = df_habs["measured_at"].dt.to_period("M").dt.to_timestamp()
     habs_monthly = (

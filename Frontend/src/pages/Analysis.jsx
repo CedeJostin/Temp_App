@@ -13,6 +13,7 @@ const HOURS      = Array.from({ length: 24 }, (_, i) => i)
 const TABS = [
   { id: 'overview',       label: 'a) Visualización general'   },
   { id: 'fdp',            label: 'b) FDP'                     },
+  { id: 'summary-table',  label: 'b.1) Tabla resumen'         },
   { id: 'isolines',       label: 'c.1) Mapa de calor'         },
   { id: 'daily-profile',  label: 'c.2) Perfil diario'         },
   { id: 'annual-profile', label: 'c.3) Perfil anual'          },
@@ -27,6 +28,15 @@ const fmt = (s) => {
 const fmtDoy = (doy) => {
   const d = new Date(2000, 0, doy)
   return d.toLocaleDateString('es-CR', { day: '2-digit', month: 'short' })
+}
+
+// ── Colores de completitud según instructivo ──────────────────
+const COMPLETITUD_COLORS = {
+  green:  { bg: '#22c55e20', border: '#22c55e40', text: '#22c55e', label: '≥ 98%' },
+  blue:   { bg: '#3b82f620', border: '#3b82f640', text: '#3b82f6', label: '95–98%' },
+  yellow: { bg: '#eab30820', border: '#eab30840', text: '#eab308', label: '90–95%' },
+  orange: { bg: '#f9731620', border: '#f9731640', text: '#f97316', label: '85–90%' },
+  red:    { bg: '#ef444420', border: '#ef444440', text: '#ef4444', label: '< 85%' },
 }
 
 // ── UI helpers ────────────────────────────────────────────────
@@ -74,17 +84,32 @@ const SectionCard = ({ title, subtitle, children, badge }) => (
   </Card>
 )
 
-// Indicador de calidad del ajuste
+// Indicador de completitud con color según rango del instructivo
+const CompletitudBadge = ({ pct, color }) => {
+  const c = COMPLETITUD_COLORS[color] || COMPLETITUD_COLORS.red
+  return (
+    <span style={{
+      fontSize: 11, fontWeight: 700, borderRadius: 20,
+      padding: '2px 10px',
+      background: c.bg, color: c.text, border: `1px solid ${c.border}`,
+    }}>
+      {pct}% completitud
+    </span>
+  )
+}
+
+// Indicador de calidad del ajuste — incluye error_range_ok
 const QualityBadge = ({ quality }) => {
   if (!quality) return null
-  const all_ok = quality.mse_ok && quality.r2_ok
+  const items = [
+    { label: `EMC ${quality.mse_target}`,    ok: quality.mse_ok         },
+    { label: `R² ${quality.r2_target}`,      ok: quality.r2_ok          },
+    { label: `Err ${quality.error_target}`,  ok: quality.error_range_ok },
+    { label: `Σw = ${quality.weights_sum?.toFixed(3)}`, ok: quality.weights_sum_ok },
+  ]
   return (
     <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-      {[
-        { label: `EMC ${quality.mse_target}`, ok: quality.mse_ok },
-        { label: `R² ${quality.r2_target}`,   ok: quality.r2_ok  },
-        { label: `Σw = ${quality.weights_sum?.toFixed(3)}`, ok: quality.weights_sum_ok },
-      ].map(({ label, ok }) => (
+      {items.map(({ label, ok }) => (
         <span key={label} style={{
           fontSize: 10, fontWeight: 600, borderRadius: 20,
           padding: '2px 8px',
@@ -150,7 +175,7 @@ function SectionOverview({ stationId, dateFrom, dateTo }) {
     <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16 }}>
       {[
         { l: 'Media', v: stats.mean },
-        { l: 'Desv.', v: stats.std  },
+        { l: 'Desv.',  v: stats.std  },
         { l: 'Mín',   v: stats.min  },
         { l: 'Máx',   v: stats.max  },
         { l: 'Q25',   v: stats.q25  },
@@ -163,10 +188,12 @@ function SectionOverview({ stationId, dateFrom, dateTo }) {
   )
 
   const DateRange = ({ stats }) => (
-    <span style={{ fontSize: 12, color: '#94a3b8' }}>
-      {fmt(stats.date_start)} → {fmt(stats.date_end)}
-      &nbsp;·&nbsp;Completitud: <strong style={{ color: '#22c55e' }}>{stats.completitud_pct}%</strong>
-    </span>
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+      <span style={{ fontSize: 12, color: '#94a3b8' }}>
+        {fmt(stats.date_start)} → {fmt(stats.date_end)}
+      </span>
+      <CompletitudBadge pct={stats.completitud_pct} color={stats.completitud_color} />
+    </div>
   )
 
   return (
@@ -179,7 +206,12 @@ function SectionOverview({ stationId, dateFrom, dateTo }) {
           <StatsRow stats={tStats} color="#ef4444" unit="°C" />
           {tStats.anomalies_count > 0 && (
             <div style={{ marginBottom: 12, padding: '8px 12px', background: '#f59e0b20', border: '1px solid #f59e0b40', borderRadius: 6, fontSize: 12, color: '#f59e0b' }}>
-              ⚠️ {tStats.anomalies_count} valores anómalos detectados (|v − μ| &gt; 3σ) — revisar si deben descartarse
+              ⚠️ {tStats.anomalies_count} valores anómalos detectados (|v − μ| &gt; 3σ = ±{tStats.anomaly_threshold?.toFixed(2)}°C) — revisar si deben descartarse
+              {tStats.anomaly_values?.length > 0 && (
+                <div style={{ marginTop: 4, fontSize: 11, color: '#fbbf24' }}>
+                  Valores: {tStats.anomaly_values.slice(0, 10).map(v => `${v}°C`).join(', ')}{tStats.anomaly_values.length > 10 ? ' …' : ''}
+                </div>
+              )}
             </div>
           )}
           <ResponsiveContainer width="100%" height={260}>
@@ -215,7 +247,12 @@ function SectionOverview({ stationId, dateFrom, dateTo }) {
           <StatsRow stats={hStats} color="#3b82f6" unit="%" />
           {hStats.anomalies_count > 0 && (
             <div style={{ marginBottom: 12, padding: '8px 12px', background: '#f59e0b20', border: '1px solid #f59e0b40', borderRadius: 6, fontSize: 12, color: '#f59e0b' }}>
-              ⚠️ {hStats.anomalies_count} valores anómalos detectados (|v − μ| &gt; 3σ)
+              ⚠️ {hStats.anomalies_count} valores anómalos detectados (|v − μ| &gt; 3σ = ±{hStats.anomaly_threshold?.toFixed(2)}%)
+              {hStats.anomaly_values?.length > 0 && (
+                <div style={{ marginTop: 4, fontSize: 11, color: '#fbbf24' }}>
+                  Valores: {hStats.anomaly_values.slice(0, 10).map(v => `${v}%`).join(', ')}{hStats.anomaly_values.length > 10 ? ' …' : ''}
+                </div>
+              )}
             </div>
           )}
           <ResponsiveContainer width="100%" height={260}>
@@ -247,7 +284,8 @@ function SectionOverview({ stationId, dateFrom, dateTo }) {
 }
 
 // ══════════════════════════════════════════════════════════════
-// SECTION B — FDP  (corregido: muestra n_components, quality flags)
+// SECTION B — FDP
+// n_components aplica tanto a gaussianas (T) como a Beta (HR)
 // ══════════════════════════════════════════════════════════════
 const GaussianCards = ({ gaussians, unit }) => (
   <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 14 }}>
@@ -282,6 +320,7 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
   const [hStats,      setHStats]      = useState(null)
   const [loading,     setLoading]     = useState(false)
   const [error,       setError]       = useState(null)
+  // n_components se aplica tanto a gaussianas (TEMP) como a Beta (HR)
   const [nComponents, setNComponents] = useState(2)
 
   const load = useCallback(async () => {
@@ -289,8 +328,16 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
     setLoading(true); setError(null)
     try {
       const [t, h] = await Promise.all([
-        measurementsApi.stats({ station_id: stationId, variable_code: 'TEMP', date_from: dateFrom, date_to: dateTo, n_components: nComponents }),
-        measurementsApi.stats({ station_id: stationId, variable_code: 'HR',   date_from: dateFrom, date_to: dateTo, n_components: nComponents }),
+        measurementsApi.stats({
+          station_id: stationId, variable_code: 'TEMP',
+          date_from: dateFrom, date_to: dateTo,
+          n_components: nComponents,
+        }),
+        measurementsApi.stats({
+          station_id: stationId, variable_code: 'HR',
+          date_from: dateFrom, date_to: dateTo,
+          n_components: nComponents,   // ← también se pasa a HR
+        }),
       ])
       setTStats(t); setHStats(h)
     } catch (e) { setError(e.message) }
@@ -303,10 +350,10 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
 
   return (
     <>
-      {/* Control de número de componentes */}
+      {/* Control de número de componentes — aplica a T y HR */}
       <Card style={{ marginBottom: 16, padding: '12px 20px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
-          <span style={{ fontSize: 13, color: '#94a3b8', fontWeight: 600 }}>Número de componentes:</span>
+          <span style={{ fontSize: 13, color: '#94a3b8', fontWeight: 600 }}>Número de componentes (T y HR):</span>
           {[1, 2, 3, 4].map(n => (
             <button key={n} onClick={() => setNComponents(n)} style={{
               padding: '4px 14px', borderRadius: 20, border: '1px solid',
@@ -317,7 +364,7 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
             }}>{n}</button>
           ))}
           <span style={{ fontSize: 11, color: '#64748b' }}>
-            Para clima monzónico (2 estaciones) se recomiendan 2 componentes.
+            Clima monzónico → 2 gaussianas. Clima tropical → varias Beta.
           </span>
         </div>
       </Card>
@@ -384,7 +431,199 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
 }
 
 // ══════════════════════════════════════════════════════════════
-// SECTION C.1 — Mapa de calor  (corregido: agrega tab hora/semana)
+// SECTION B.1 — Tabla resumen exportable por estación
+// Columnas del instructivo: número, coordenadas, altura, período,
+// μ/σ/w (gaussianas) o moda/varianza/w (Beta), EMC, R²
+// ══════════════════════════════════════════════════════════════
+function SectionSummaryTable({ dateFrom, dateTo }) {
+  const [variable,    setVariable]    = useState('TEMP')
+  const [nComponents, setNComponents] = useState(2)
+  const [data,        setData]        = useState(null)
+  const [loading,     setLoading]     = useState(false)
+  const [error,       setError]       = useState(null)
+
+  const load = useCallback(async () => {
+    setLoading(true); setError(null)
+    try {
+      const r = await measurementsApi.statsSummaryTable({
+        variable_code: variable,
+        date_from:     dateFrom,
+        date_to:       dateTo,
+        n_components:  nComponents,
+      })
+      setData(r)
+    } catch (e) { setError(e.message) }
+    finally { setLoading(false) }
+  }, [variable, dateFrom, dateTo, nComponents])
+
+  useEffect(() => { load() }, [load])
+
+  const isHR = variable === 'HR'
+
+  // Construir encabezados dinámicos según n_components
+  const compHeaders = Array.from({ length: nComponents }, (_, i) =>
+    isHR
+      ? [`Moda${i+1}`, `Var${i+1}`, `w${i+1}`]
+      : [`μ${i+1}`, `σ${i+1}`, `w${i+1}`]
+  ).flat()
+
+  const exportCSV = () => {
+    if (!data?.stations?.length) return
+    const headers = ['Estación', 'Lat', 'Lon', 'Alt (m)', 'Inicio', 'Fin', 'N', 'Compl.%',
+      ...compHeaders, 'EMC', 'R²', 'EMC ok', 'R² ok', 'Err ok', 'Σw ok']
+    const rows = data.stations.map(s => {
+      const compVals = Array.from({ length: nComponents }, (_, i) => {
+        const c = s.components?.[i]
+        if (!c) return isHR ? ['—', '—', '—'] : ['—', '—', '—']
+        return isHR
+          ? [c.mode ?? '—', c.variance ?? '—', ((c.w ?? 0) * 100).toFixed(1) + '%']
+          : [c.mu ?? '—', c.sigma ?? '—', ((c.w ?? 0) * 100).toFixed(1) + '%']
+      }).flat()
+      return [
+        s.station_name,
+        s.latitude ?? '', s.longitude ?? '', s.altitude_m ?? '',
+        fmt(s.date_start), fmt(s.date_end),
+        s.n, s.completitud_pct,
+        ...compVals,
+        s.mse?.toExponential(2) ?? '—',
+        s.r2?.toFixed(4) ?? '—',
+        s.quality?.mse_ok ? 'Sí' : 'No',
+        s.quality?.r2_ok  ? 'Sí' : 'No',
+        s.quality?.error_range_ok ? 'Sí' : 'No',
+        s.quality?.weights_sum_ok ? 'Sí' : 'No',
+      ]
+    })
+    const csv = [headers, ...rows].map(r => r.join(',')).join('\n')
+    const blob = new Blob([csv], { type: 'text/csv' })
+    const url  = URL.createObjectURL(blob)
+    const a    = document.createElement('a')
+    a.href = url; a.download = `resumen_${variable}_${nComponents}comp.csv`; a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  return (
+    <>
+      <Card style={{ padding: '12px 20px', marginBottom: 16 }}>
+        <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'center' }}>
+          <div>
+            <span style={{ fontSize: 13, color: '#94a3b8', fontWeight: 600, marginRight: 8 }}>Variable:</span>
+            {['TEMP', 'HR'].map(v => (
+              <button key={v} onClick={() => setVariable(v)} style={{
+                padding: '4px 14px', borderRadius: 20, border: '1px solid',
+                fontSize: 13, cursor: 'pointer', marginRight: 6,
+                background:   variable === v ? '#6366f1' : 'transparent',
+                borderColor:  variable === v ? '#6366f1' : '#334155',
+                color:        variable === v ? '#fff'    : '#94a3b8',
+              }}>{v}</button>
+            ))}
+          </div>
+          <div>
+            <span style={{ fontSize: 13, color: '#94a3b8', fontWeight: 600, marginRight: 8 }}>Componentes:</span>
+            {[1, 2, 3, 4].map(n => (
+              <button key={n} onClick={() => setNComponents(n)} style={{
+                padding: '4px 12px', borderRadius: 20, border: '1px solid',
+                fontSize: 13, cursor: 'pointer', marginRight: 4,
+                background:   nComponents === n ? '#22c55e' : 'transparent',
+                borderColor:  nComponents === n ? '#22c55e' : '#334155',
+                color:        nComponents === n ? '#000'    : '#94a3b8',
+              }}>{n}</button>
+            ))}
+          </div>
+          <button onClick={exportCSV} style={{
+            padding: '6px 16px', borderRadius: 8, border: '1px solid #334155',
+            background: '#0f172a', color: '#94a3b8', fontSize: 12, cursor: 'pointer',
+          }}>⬇ Exportar CSV</button>
+        </div>
+      </Card>
+
+      {loading && <Spinner />}
+      {error   && <Err msg={error} />}
+
+      {!loading && data?.stations?.length > 0 && (
+        <Card>
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ borderCollapse: 'collapse', fontSize: 11, width: '100%' }}>
+              <thead>
+                <tr style={{ borderBottom: '1px solid #334155' }}>
+                  {['#', 'Estación', 'Lat', 'Lon', 'Alt(m)', 'Inicio', 'Fin', 'N', 'Compl.',
+                    ...compHeaders,
+                    'EMC', 'R²', '✓EMC', '✓R²', '✓Err', '✓Σw'
+                  ].map(h => (
+                    <th key={h} style={{ padding: '6px 10px', color: '#64748b', textAlign: 'left', whiteSpace: 'nowrap', fontWeight: 600 }}>
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {data.stations.map((s, idx) => {
+                  const compVals = Array.from({ length: nComponents }, (_, i) => {
+                    const c = s.components?.[i]
+                    if (!c) return isHR ? ['—', '—', '—'] : ['—', '—', '—']
+                    return isHR
+                      ? [c.mode?.toFixed(1) ?? '—', c.variance?.toFixed(4) ?? '—', ((c.w ?? 0)*100).toFixed(1)+'%']
+                      : [c.mu?.toFixed(2) ?? '—', c.sigma?.toFixed(3) ?? '—', ((c.w ?? 0)*100).toFixed(1)+'%']
+                  }).flat()
+                  const q = s.quality
+                  const cc = COMPLETITUD_COLORS[s.completitud_color] || COMPLETITUD_COLORS.red
+                  return (
+                    <tr key={s.station_code} style={{ borderBottom: '1px solid #1e293b' }}>
+                      <td style={{ padding: '5px 10px', color: '#64748b' }}>{idx + 1}</td>
+                      <td style={{ padding: '5px 10px', color: '#f1f5f9', fontWeight: 600, whiteSpace: 'nowrap' }}>{s.station_name}</td>
+                      <td style={{ padding: '5px 10px', color: '#94a3b8' }}>{s.latitude?.toFixed(4) ?? '—'}</td>
+                      <td style={{ padding: '5px 10px', color: '#94a3b8' }}>{s.longitude?.toFixed(4) ?? '—'}</td>
+                      <td style={{ padding: '5px 10px', color: '#94a3b8' }}>{s.altitude_m ?? '—'}</td>
+                      <td style={{ padding: '5px 10px', color: '#94a3b8', whiteSpace: 'nowrap' }}>{fmt(s.date_start)}</td>
+                      <td style={{ padding: '5px 10px', color: '#94a3b8', whiteSpace: 'nowrap' }}>{fmt(s.date_end)}</td>
+                      <td style={{ padding: '5px 10px', color: '#94a3b8' }}>{s.n?.toLocaleString()}</td>
+                      <td style={{ padding: '5px 10px' }}>
+                        <span style={{ color: cc.text, fontWeight: 700 }}>{s.completitud_pct}%</span>
+                      </td>
+                      {compVals.map((v, i) => (
+                        <td key={i} style={{ padding: '5px 10px', color: '#f1f5f9', fontFamily: 'monospace' }}>{v}</td>
+                      ))}
+                      <td style={{ padding: '5px 10px', color: '#f1f5f9', fontFamily: 'monospace' }}>
+                        {s.mse?.toExponential(2) ?? '—'}
+                      </td>
+                      <td style={{ padding: '5px 10px', color: '#f1f5f9', fontFamily: 'monospace' }}>
+                        {s.r2?.toFixed(4) ?? '—'}
+                      </td>
+                      {[q?.mse_ok, q?.r2_ok, q?.error_range_ok, q?.weights_sum_ok].map((ok, i) => (
+                        <td key={i} style={{ padding: '5px 10px', textAlign: 'center', color: ok ? '#22c55e' : '#ef4444' }}>
+                          {ok ? '✓' : '✗'}
+                        </td>
+                      ))}
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Leyenda de completitud */}
+          <div style={{ display: 'flex', gap: 10, marginTop: 14, flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 11, color: '#64748b' }}>Completitud:</span>
+            {Object.entries(COMPLETITUD_COLORS).map(([key, c]) => (
+              <span key={key} style={{
+                fontSize: 10, padding: '2px 8px', borderRadius: 20,
+                background: c.bg, color: c.text, border: `1px solid ${c.border}`,
+              }}>{c.label}</span>
+            ))}
+          </div>
+        </Card>
+      )}
+
+      {!loading && data?.stations?.length === 0 && (
+        <div style={{ textAlign: 'center', color: '#64748b', padding: '2rem' }}>
+          Sin datos para los filtros seleccionados.
+        </div>
+      )}
+    </>
+  )
+}
+
+// ══════════════════════════════════════════════════════════════
+// SECTION C.1 — Mapa de calor
 // ══════════════════════════════════════════════════════════════
 function SectionIsolines({ stationId, dateFrom, dateTo }) {
   const [groupBy,  setGroupBy]  = useState('hour')
@@ -414,7 +653,6 @@ function SectionIsolines({ stationId, dateFrom, dateTo }) {
 
   if (error) return <Err msg={error} />
 
-  // Construir matriz mes × eje
   const buildMatrix = (hm) => {
     if (!hm) return null
     const ejeProp  = hm.eje_label ?? 'hora'
@@ -479,7 +717,6 @@ function SectionIsolines({ stationId, dateFrom, dateTo }) {
 
   return (
     <>
-      {/* Selector hora / semana */}
       <Card style={{ padding: '12px 20px', marginBottom: 16 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           <span style={{ fontSize: 13, color: '#94a3b8', fontWeight: 600 }}>Agrupación eje secundario:</span>
@@ -507,7 +744,6 @@ function SectionIsolines({ stationId, dateFrom, dateTo }) {
         </>
       )}
 
-      {/* Variación anual promedio — gráfico de líneas */}
       {(tMo.length > 0 || hMo.length > 0) && (
         <SectionCard title="Variación anual promedio (promedios mensuales T y HR)">
           <ResponsiveContainer width="100%" height={280}>
@@ -531,14 +767,14 @@ function SectionIsolines({ stationId, dateFrom, dateTo }) {
 }
 
 // ══════════════════════════════════════════════════════════════
-// SECTION C.2 — Perfil diario promedio por mes  (NUEVO)
+// SECTION C.2 — Perfil diario promedio por mes
 // ══════════════════════════════════════════════════════════════
 function SectionDailyProfile({ stationId, dateFrom, dateTo }) {
   const [tProfile, setTProfile] = useState(null)
   const [hProfile, setHProfile] = useState(null)
   const [loading,  setLoading]  = useState(false)
   const [error,    setError]    = useState(null)
-  const [selMonth, setSelMonth] = useState('0')  // '0' = anual, '1'-'12' = mes
+  const [selMonth, setSelMonth] = useState('0')
 
   const load = useCallback(async () => {
     if (!stationId) return
@@ -607,7 +843,6 @@ function SectionDailyProfile({ stationId, dateFrom, dateTo }) {
       </div>
       <MonthSelector />
 
-      {/* Temperatura — perfil diario */}
       {tData.length > 0 && (
         <SectionCard title={`Temperatura — Perfil diario (${monthLabel})`} subtitle="Estadísticos horarios">
           <ResponsiveContainer width="100%" height={300}>
@@ -637,7 +872,6 @@ function SectionDailyProfile({ stationId, dateFrom, dateTo }) {
         </SectionCard>
       )}
 
-      {/* Humedad — perfil diario */}
       {hData.length > 0 && (
         <SectionCard title={`Humedad Relativa — Perfil diario (${monthLabel})`} subtitle="Estadísticos horarios (moda como estadístico principal)">
           <ResponsiveContainer width="100%" height={300}>
@@ -671,7 +905,7 @@ function SectionDailyProfile({ stationId, dateFrom, dateTo }) {
 }
 
 // ══════════════════════════════════════════════════════════════
-// SECTION C.3 — Perfil anual promedio  (NUEVO)
+// SECTION C.3 — Perfil anual promedio
 // ══════════════════════════════════════════════════════════════
 function SectionAnnualProfile({ stationId, dateFrom, dateTo }) {
   const [tProfile, setTProfile] = useState(null)
@@ -701,20 +935,17 @@ function SectionAnnualProfile({ stationId, dateFrom, dateTo }) {
 
   const tSeries = tProfile?.series ?? []
   const hSeries = hProfile?.series ?? []
-
-  // Marcadores de inicio de mes (aproximado, año no bisiesto)
   const monthDoys = [1,32,60,91,121,152,182,213,244,274,305,335]
 
   return (
     <>
       <div style={{ marginBottom: 8 }}>
         <p style={{ margin: 0, fontSize: 13, color: '#94a3b8' }}>
-          Perfil anual promedio (c.3): media diaria de T y moda diaria de HR promediadas por día del año sobre todo el período.
+          Perfil anual promedio (c.3): media diaria de T y moda diaria de HR promediadas por día del año.
           Muestra si los máximos ocurren en momentos específicos del año.
         </p>
       </div>
 
-      {/* Temperatura anual */}
       {tSeries.length > 0 && (
         <SectionCard
           title="Temperatura — Variación anual promedio"
@@ -729,17 +960,15 @@ function SectionAnnualProfile({ stationId, dateFrom, dateTo }) {
                 </linearGradient>
               </defs>
               <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
-              <XAxis dataKey="doy" tickFormatter={fmtDoy}
-                ticks={monthDoys} tick={{ fontSize: 10, fill: '#94a3b8' }} />
+              <XAxis dataKey="doy" tickFormatter={fmtDoy} ticks={monthDoys} tick={{ fontSize: 10, fill: '#94a3b8' }} />
               <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} unit="°C" />
-              <Tooltip labelFormatter={fmtDoy}
-                contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }} />
+              <Tooltip labelFormatter={fmtDoy} contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }} />
               <Legend />
-              <Area type="monotone" dataKey="max" name="Máx"     stroke="#ef4444" fill="none"     strokeWidth={1} opacity={0.4} dot={false} />
-              <Area type="monotone" dataKey="q75" name="Q75"     stroke="#f97316" fill="none"     strokeWidth={1} strokeDasharray="4 2" dot={false} />
-              <Area type="monotone" dataKey="avg" name="Media"   stroke="#ef4444" fill="url(#tag)" strokeWidth={2} dot={false} />
-              <Area type="monotone" dataKey="q25" name="Q25"     stroke="#f97316" fill="none"     strokeWidth={1} strokeDasharray="4 2" dot={false} />
-              <Area type="monotone" dataKey="min" name="Mín"     stroke="#ef4444" fill="none"     strokeWidth={1} opacity={0.4} dot={false} />
+              <Area type="monotone" dataKey="max" name="Máx"   stroke="#ef4444" fill="none"     strokeWidth={1} opacity={0.4} dot={false} />
+              <Area type="monotone" dataKey="q75" name="Q75"   stroke="#f97316" fill="none"     strokeWidth={1} strokeDasharray="4 2" dot={false} />
+              <Area type="monotone" dataKey="avg" name="Media" stroke="#ef4444" fill="url(#tag)" strokeWidth={2} dot={false} />
+              <Area type="monotone" dataKey="q25" name="Q25"   stroke="#f97316" fill="none"     strokeWidth={1} strokeDasharray="4 2" dot={false} />
+              <Area type="monotone" dataKey="min" name="Mín"   stroke="#ef4444" fill="none"     strokeWidth={1} opacity={0.4} dot={false} />
               {monthDoys.map((d, i) => (
                 <ReferenceLine key={i} x={d} stroke="#334155" strokeDasharray="2 4"
                   label={{ value: MONTHS[i], fontSize: 9, fill: '#64748b', position: 'insideTopRight' }} />
@@ -749,7 +978,6 @@ function SectionAnnualProfile({ stationId, dateFrom, dateTo }) {
         </SectionCard>
       )}
 
-      {/* Humedad anual */}
       {hSeries.length > 0 && (
         <SectionCard
           title="Humedad Relativa — Variación anual promedio"
@@ -764,11 +992,9 @@ function SectionAnnualProfile({ stationId, dateFrom, dateTo }) {
                 </linearGradient>
               </defs>
               <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
-              <XAxis dataKey="doy" tickFormatter={fmtDoy}
-                ticks={monthDoys} tick={{ fontSize: 10, fill: '#94a3b8' }} />
+              <XAxis dataKey="doy" tickFormatter={fmtDoy} ticks={monthDoys} tick={{ fontSize: 10, fill: '#94a3b8' }} />
               <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} unit="%" domain={[0, 100]} />
-              <Tooltip labelFormatter={fmtDoy}
-                contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }} />
+              <Tooltip labelFormatter={fmtDoy} contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }} />
               <Legend />
               <Area type="monotone" dataKey="max" name="Máx"  stroke="#3b82f6" fill="none"     strokeWidth={1} opacity={0.4} dot={false} />
               <Area type="monotone" dataKey="q75" name="Q75"  stroke="#6366f1" fill="none"     strokeWidth={1} strokeDasharray="4 2" dot={false} />
@@ -788,13 +1014,13 @@ function SectionAnnualProfile({ stationId, dateFrom, dateTo }) {
 }
 
 // ══════════════════════════════════════════════════════════════
-// SECTION D — T × HR combinado  (corregido: contornos + mobility)
+// SECTION D — T × HR combinado
 // ══════════════════════════════════════════════════════════════
 function SectionCombined({ stationId, stationAlt, dateFrom, dateTo }) {
   const [data,    setData]    = useState(null)
   const [loading, setLoading] = useState(false)
   const [error,   setError]   = useState(null)
-  const [contour, setContour] = useState('all')  // 'all' | '90' | '95' | '99'
+  const [contour, setContour] = useState('all')
 
   const load = useCallback(async () => {
     if (!stationId) return
@@ -817,7 +1043,6 @@ function SectionCombined({ stationId, stationAlt, dateFrom, dateTo }) {
   if (error)   return <Err msg={error} />
   if (!data)   return null
 
-  // Filtrar densidad por contorno seleccionado
   const filteredDensity = contour === 'all'
     ? data.density
     : data.density.filter(d => {
@@ -825,7 +1050,6 @@ function SectionCombined({ stationId, stationAlt, dateFrom, dateTo }) {
         return !isNaN(lvl) && lvl <= parseInt(contour)
       })
 
-  // Colores por contorno
   const contourColor = (d) => {
     if (d.contour === '90') return '#22c55e'
     if (d.contour === '95') return '#f97316'
@@ -833,18 +1057,15 @@ function SectionCombined({ stationId, stationAlt, dateFrom, dateTo }) {
     return '#64748b'
   }
 
-  // Movilidad: heatmap mes × hora de T_avg
   const mobilityT = data.mobility ?? []
 
   return (
     <>
-      {/* Densidad T × HR con contornos */}
       {data.density.length > 0 && (
         <SectionCard
           title="d.1) Distribución T × HR"
           subtitle={`Tiempo de humectación (T>10°C y HR>79%): ${data.humect_pct}% (${data.humect_count} registros)`}
         >
-          {/* Selector de contorno */}
           <div style={{ display: 'flex', gap: 6, marginBottom: 14, flexWrap: 'wrap', alignItems: 'center' }}>
             <span style={{ fontSize: 12, color: '#94a3b8', fontWeight: 600 }}>Mostrar:</span>
             {[
@@ -884,7 +1105,6 @@ function SectionCombined({ stationId, stationAlt, dateFrom, dateTo }) {
             </ScatterChart>
           </ResponsiveContainer>
 
-          {/* Leyenda de contornos */}
           <div style={{ display: 'flex', gap: 14, marginTop: 8, flexWrap: 'wrap', fontSize: 11 }}>
             {[['90', '#22c55e', '90% más denso'], ['95', '#f97316', '90–95%'], ['99', '#6366f1', '95–99%'], ['out', '#64748b', 'Fuera del 99%']].map(([lvl, col, lbl]) => (
               <span key={lvl} style={{ display: 'flex', alignItems: 'center', gap: 4, color: '#94a3b8' }}>
@@ -896,7 +1116,6 @@ function SectionCombined({ stationId, stationAlt, dateFrom, dateTo }) {
         </SectionCard>
       )}
 
-      {/* Humedad Absoluta */}
       {data.habs_monthly.length > 0 && (
         <SectionCard title="d.2) Humedad Absoluta mensual" subtitle={`Altitud: ${stationAlt || 0} m s.n.m.`}>
           <div style={{ marginBottom: 10, fontSize: 11, color: '#64748b', fontFamily: 'monospace' }}>
@@ -920,7 +1139,6 @@ function SectionCombined({ stationId, stationAlt, dateFrom, dateTo }) {
         </SectionCard>
       )}
 
-      {/* Gráfico psicrométrico */}
       {data.scatter.length > 0 && (
         <SectionCard title="d.3) Gráfico psicrométrico (T vs H abs)">
           <ResponsiveContainer width="100%" height={320}>
@@ -938,11 +1156,10 @@ function SectionCombined({ stationId, stationAlt, dateFrom, dateTo }) {
         </SectionCard>
       )}
 
-      {/* Movilidad del flujo — mapa de calor mes × hora de T */}
       {mobilityT.length > 0 && (
         <SectionCard
           title="d.4) Movilidad del flujo T × HR durante el año"
-          subtitle="Temperatura promedio por mes y hora del día — muestra cuándo ocurren los máximos"
+          subtitle="Temperatura y HR promedio por mes y hora del día — muestra cuándo ocurren los máximos"
         >
           {(() => {
             const matT  = Array.from({ length: 12 }, () => Array(24).fill(null))
@@ -1036,6 +1253,9 @@ export default function Analysis() {
     setQueried(false)
   }
 
+  // La tab de tabla resumen no requiere estación seleccionada
+  const tabRequiresStation = activeTab !== 'summary-table'
+
   return (
     <div style={{ padding: '2rem 2.5rem', maxWidth: 1200 }}>
       <div style={{ marginBottom: '1.5rem' }}>
@@ -1070,39 +1290,42 @@ export default function Analysis() {
         </div>
         <button
           onClick={() => setQueried(true)}
-          disabled={!stationId}
+          disabled={tabRequiresStation && !stationId}
           style={{
             padding: '8px 20px', borderRadius: 8, border: 'none', fontWeight: 600, fontSize: 13,
-            cursor: stationId ? 'pointer' : 'not-allowed',
-            background: stationId ? '#22c55e' : '#334155',
-            color: stationId ? '#000' : '#64748b',
+            cursor: (tabRequiresStation && !stationId) ? 'not-allowed' : 'pointer',
+            background: (tabRequiresStation && !stationId) ? '#334155' : '#22c55e',
+            color:      (tabRequiresStation && !stationId) ? '#64748b'  : '#000',
           }}>
           Consultar
         </button>
       </div>
 
-      {!queried ? (
+      {/* Tabs */}
+      <div style={{ display: 'flex', gap: 2, marginBottom: 20, flexWrap: 'wrap', borderBottom: '1px solid #1e293b', paddingBottom: 0 }}>
+        {TABS.map(t => (
+          <button key={t.id} onClick={() => { setActiveTab(t.id); if (t.id === 'summary-table') setQueried(true) }} style={{
+            padding: '10px 16px', fontSize: 13, fontWeight: 500, cursor: 'pointer',
+            background: 'none', border: 'none',
+            color: activeTab === t.id ? '#22c55e' : '#94a3b8',
+            borderBottom: `2px solid ${activeTab === t.id ? '#22c55e' : 'transparent'}`,
+            marginBottom: -1,
+          }}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Contenido por tab */}
+      {activeTab === 'summary-table' ? (
+        <SectionSummaryTable dateFrom={dateFrom || undefined} dateTo={dateTo || undefined} />
+      ) : !queried ? (
         <div style={{ textAlign: 'center', padding: '4rem 0', color: '#94a3b8' }}>
           <div style={{ fontSize: 48, marginBottom: 12 }}>🌦️</div>
           <p>Seleccioná una estación y hacé clic en <strong>Consultar</strong> para comenzar el análisis.</p>
         </div>
       ) : (
         <>
-          {/* Tabs */}
-          <div style={{ display: 'flex', gap: 2, marginBottom: 20, flexWrap: 'wrap', borderBottom: '1px solid #1e293b', paddingBottom: 0 }}>
-            {TABS.map(t => (
-              <button key={t.id} onClick={() => setActiveTab(t.id)} style={{
-                padding: '10px 16px', fontSize: 13, fontWeight: 500, cursor: 'pointer',
-                background: 'none', border: 'none',
-                color: activeTab === t.id ? '#22c55e' : '#94a3b8',
-                borderBottom: `2px solid ${activeTab === t.id ? '#22c55e' : 'transparent'}`,
-                marginBottom: -1,
-              }}>
-                {t.label}
-              </button>
-            ))}
-          </div>
-
           {activeTab === 'overview'       && <SectionOverview      stationId={stationId} dateFrom={dateFrom || undefined} dateTo={dateTo || undefined} />}
           {activeTab === 'fdp'            && <SectionFDP           stationId={stationId} dateFrom={dateFrom || undefined} dateTo={dateTo || undefined} />}
           {activeTab === 'isolines'       && <SectionIsolines      stationId={stationId} dateFrom={dateFrom || undefined} dateTo={dateTo || undefined} />}
