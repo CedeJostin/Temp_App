@@ -11,6 +11,41 @@ const VARIABLES = [
 const parsearCSV = (texto) => {
   const lineas = texto.trim().split("\n").filter(Boolean)
   const sep = lineas[0].includes(";") ? ";" : ","
+
+  // ── Formato C: metadata en filas 0-3 (Estacion:;NOMBRE…) ──────────
+  const primeraCelda = lineas[0].split(sep)[0].trim().toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+  if (primeraCelda === "estacion:" || primeraCelda === "estacion") {
+    // Variable detectada en fila 2
+    const celdaVar = lineas[2]?.split(sep) ?? []
+    const textoVar = celdaVar.join(" ").toLowerCase()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    const variableDetectada =
+      textoVar.includes("temperatura") ? "Temperatura" :
+      textoVar.includes("humedad")     ? "Humedad"     :
+      textoVar.includes("radiaci")     ? "Radiacion"   :
+      textoVar.includes("viento")      ? "Viento"      : "Desconocida"
+
+    // Encabezados en fila 3, datos desde fila 4
+    const columnas = lineas[3].split(sep)
+      .filter(c => !c.trim().startsWith("Unnamed") && c.trim() !== "")
+      .slice(0, 7)
+      .map(c => c.trim())
+
+    const filas = lineas.slice(4, 7).map(l =>
+      l.split(sep)
+       .filter((_, i) => i !== 1)   // quitar columna vacía (índice 1)
+       .slice(0, 7)
+       .map(c => c.trim())
+    )
+    const totalFilas = lineas.length - 4
+    const totalFaltantes = lineas.slice(4).reduce((acc, l) =>
+      acc + l.split(sep).filter(c => c.trim() === "-" || c.trim() === "-9").length, 0
+    )
+    return { columnas, filas, totalFilas, totalFaltantes, variableDetectada, formato: "C" }
+  }
+
+  // ── Formatos A / B: encabezado en fila 0 o 1 ──────────────────────
   const columnas = lineas[0].split(sep).map(c => c.trim().replace(/^\uFEFF/, ""))
   const colsNorm = columnas.map(c =>
     c.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase()
@@ -18,12 +53,13 @@ const parsearCSV = (texto) => {
   const esHorario = colsNorm.includes("ano") && colsNorm.includes("h1")
   const esViento  = colsNorm.includes("fecha") && colsNorm.includes("velocidad")
   if (!esHorario && !esViento) throw new Error("formato_desconocido")
+
   const filas = lineas.slice(1, 4).map(l => l.split(sep).slice(0, 6).map(c => c.trim()))
   const totalFilas = lineas.length - 1
   const totalFaltantes = lineas.slice(1).reduce((acc, l) =>
     acc + l.split(sep).filter(c => c.trim() === "-" || c.trim() === "-9").length, 0
   )
-  return { columnas: columnas.slice(0, 6), filas, totalFilas, totalFaltantes }
+  return { columnas: columnas.slice(0, 6), filas, totalFilas, totalFaltantes, formato: "AB" }
 }
 
 function DropZone({ variable, archivo, preview, error, onFile, onQuitar }) {
@@ -145,7 +181,10 @@ export default function Upload() {
         const texto = new TextDecoder("windows-1252").decode(e.target.result)
         setPreviews(p => ({ ...p, [key]: parsearCSV(texto) }))
       } catch {
-        setErrores(p => ({ ...p, [key]: "Formato no reconocido. Verificá columnas: año, mes, dia, H1…H24" }))
+        setErrores(p => ({
+  ...p,
+  [key]: "Formato no reconocido. Válidos: (A/B) encabezado con año;mes;dia;H1…H24, o (C) archivo con 'Estacion:' en fila 1 y horas 1:00…24:00"
+}))
       }
     }
     reader.readAsArrayBuffer(file)

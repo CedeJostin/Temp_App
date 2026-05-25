@@ -6,9 +6,10 @@ Convierte archivos CSV y Excel meteorológicos a un DataFrame normalizado con co
     value        (float)
 
 Soporta:
-  - Formato A: encabezado en fila 0,  columnas H1…H24
-  - Formato B: encabezado en fila 1,  columnas 01:00…24:00
-  - Formato L: formato largo (Fecha | Hora | ... | Valor)
+  - Formato A:  encabezado en fila 0,  columnas H1…H24
+  - Formato B:  encabezado en fila 1,  columnas 01:00…24:00
+  - Formato C:  metadata en filas 0-3, columnas 1:00…24:00 (sin cero inicial)
+  - Formato L:  formato largo (Fecha | Hora | ... | Valor)
   - Archivos Excel con múltiples hojas
 """
 
@@ -19,8 +20,8 @@ import numpy as np
 
 # ── helpers ──────────────────────────────────────────────────────────
 
-HOUR_COLS_B     = [f"{i:02d}:00" for i in range(1, 25)]
-HOUR_COLS_B_ALT = [f"{i}:00" for i in range(1, 25)] + ["24:00:00"]
+HOUR_COLS_B     = [f"{i:02d}:00" for i in range(1, 25)]          # 01:00…24:00
+HOUR_COLS_B_ALT = [f"{i}:00" for i in range(1, 25)] + ["24:00:00"]  # 1:00…24:00
 
 
 def _norm(txt: str) -> str:
@@ -38,24 +39,37 @@ def _to_float(series: pd.Series) -> pd.Series:
 
 
 def _detect_hour_cols(df: pd.DataFrame):
-    """Devuelve (lista_columnas, formato) donde formato ∈ {'A','B','UNKNOWN'}"""
+    """Devuelve (lista_columnas, formato) donde formato ∈ {'A','B','C','UNKNOWN'}"""
     cols = {c: str(c).strip() for c in df.columns}
 
+    # Formato A: H1…H24
     found_a = [c for c, v in cols.items()
                if v.upper() in [f"H{i}" for i in range(1, 25)]]
     if len(found_a) >= 12:
         found_a.sort(key=lambda c: int(str(c).upper().replace("H", "")))
         return found_a, "A"
 
-    all_b = set(HOUR_COLS_B + HOUR_COLS_B_ALT)
+    # Formato B: 01:00…24:00
+    all_b = set(HOUR_COLS_B)
     found_b = [c for c, v in cols.items() if v in all_b]
     if len(found_b) >= 12:
         def _sk(c):
-            v = str(c).replace(":00:00","").replace(":00","")
+            v = str(c).replace(":00","")
             try: return int(v)
             except: return 99
         found_b.sort(key=_sk)
         return found_b, "B"
+
+    # Formato C: 1:00…24:00 (sin cero inicial)
+    all_c = set(HOUR_COLS_B_ALT)
+    found_c = [c for c, v in cols.items() if v in all_c]
+    if len(found_c) >= 12:
+        def _skc(c):
+            v = str(c).replace(":00:00","").replace(":00","")
+            try: return int(v)
+            except: return 99
+        found_c.sort(key=_skc)
+        return found_c, "C"
 
     return [], "UNKNOWN"
 
@@ -66,12 +80,12 @@ def _rename_date_cols(df: pd.DataFrame) -> pd.DataFrame:
         cl = _norm(c).replace(" ", "")
         if   cl in ["ano","anio","year","a","año"]: rename[c] = "_year"
         elif cl in ["mes","month","m"]:             rename[c] = "_month"
-        elif cl in ["dia","day","d","día"]:         rename[c] = "_day"
+        elif cl in ["dia","day","d","día","dia"]:  rename[c] = "_day"
     return df.rename(columns=rename)
 
 
 def _wide_to_long(df: pd.DataFrame, value_col: str) -> pd.DataFrame | None:
-    """Pivota un DataFrame ancho (año|mes|día|H1…H24) a largo (measured_at, value)."""
+    """Pivota un DataFrame ancho (año|mes|día|H1…H24 o 1:00…24:00) a largo."""
     hour_cols, fmt = _detect_hour_cols(df)
     if not hour_cols:
         return None
@@ -97,6 +111,7 @@ def _wide_to_long(df: pd.DataFrame, value_col: str) -> pd.DataFrame | None:
         s = str(s).strip().upper()
         if fmt == "A":
             return int(s.replace("H", ""))
+        # B y C: "01:00", "1:00", "24:00:00" → int
         return int(s.replace(":00:00","").replace(":00",""))
 
     hora_int  = melted["_hora_str"].apply(_hora_num)
@@ -122,11 +137,73 @@ def _wide_to_long(df: pd.DataFrame, value_col: str) -> pd.DataFrame | None:
 
 def _detect_variable(text: str, filename: str = "") -> str:
     t = _norm(text + " " + filename)
-    if "temperatura" in t or "temp" in t:            return "Temperatura"
-    if "humedad" in t or "hum" in t:                 return "Humedad"
-    if "radiaci" in t or "mj" in t or "rad" in t:   return "Radiacion"
-    if "viento" in t or "velocidad" in t or "vel" in t: return "Viento"
+    if "temperatura" in t or "temp" in t:                return "Temperatura"
+    if "humedad" in t or "hum" in t:                     return "Humedad"
+    if "radiaci" in t or "mj" in t or "rad" in t:        return "Radiacion"
+    if "viento" in t or "velocidad" in t or "vel" in t:  return "Viento"
     return "UNKNOWN"
+
+
+def _detect_formato_c(raw_lines: list[str], sep: str) -> bool:
+    """
+    Detecta el Formato C: primera línea contiene "estacion" (con o sin tilde).
+    """
+    if not raw_lines:
+        return False
+    return _norm(raw_lines[0].split(sep)[0]) in ["estacion:", "estacion"]
+
+
+def _parse_formato_c(
+    file_bytes: bytes,
+    filename:   str,
+    enc:        str,
+    logs:       list[str],
+) -> tuple[pd.DataFrame, str, list[str]]:
+    """
+    Formato C — archivo con 4 filas de metadata:
+      Fila 0: Estacion:;NOMBRE…
+      Fila 1: vacía
+      Fila 2: ;;Fecha;;;Temperatura (°C)… / Humedad Relativa (%)…
+      Fila 3: Control de fecha;;Año;Mes;Día;1:00;2:00;…;24:00
+      Fila 4+: datos  (dd/mm/yyyy;;YYYY;MM;DD;val;val;…)
+    """
+    sep = ";"
+
+    # ── Leer texto crudo para detectar variable en fila 2 ──
+    raw_text = file_bytes.decode(enc, errors="replace")
+    raw_lines = raw_text.splitlines()
+
+    var_text = raw_lines[2] if len(raw_lines) > 2 else ""
+    vtype = _detect_variable(var_text, filename)
+
+    # ── Leer datos saltando las 4 filas de metadata ─────────
+    # header=3 → la fila 3 (índice 0-based) se usa como encabezado
+    try:
+        df = pd.read_csv(
+            io.BytesIO(file_bytes),
+            sep=sep,
+            encoding=enc,
+            header=3,          # fila 3 = "Control de fecha;;Año;Mes;Día;1:00;…"
+            decimal=",",
+            dtype=str,
+        )
+    except Exception as e:
+        logs.append(f"❌ {filename} (Formato C): error leyendo CSV: {e}")
+        return pd.DataFrame(), vtype, logs
+
+    # Limpiar columnas duplicadas / sin nombre producidas por ;; vacíos
+    # La columna vacía entre "Control de fecha" y "Año" se llama "Unnamed: 1"
+    df = df.loc[:, ~df.columns.str.startswith("Unnamed")]
+    df.columns = [str(c).strip() for c in df.columns]
+
+    parsed = _wide_to_long(df, vtype)
+    if parsed is None or parsed.empty:
+        logs.append(f"⚠️ {filename} (Formato C): _wide_to_long devolvió vacío")
+        return pd.DataFrame(), vtype, logs
+
+    parsed["measured_at"] = parsed["measured_at"].dt.round("h")
+    logs.append(f"✅ {filename} → {vtype} ({len(parsed):,} registros, Formato C)")
+    return parsed, vtype, logs
 
 
 def _parse_long_format(
@@ -134,13 +211,9 @@ def _parse_long_format(
     filename: str,
     logs: list[str],
 ) -> tuple[pd.DataFrame, str, list[str]]:
-    """
-    Maneja CSVs con formato largo: columna Fecha + columna Hora + columna de valor.
-    Ej: Fecha | Hora | Dirección | Velocidad (m/s) | ...
-    """
+    """Maneja CSVs con formato largo: Fecha | Hora | ... | Valor."""
     col_map = {_norm(str(c)): c for c in df.columns}
 
-    # Detectar columna de fecha y hora
     fecha_col = next((col_map[k] for k in col_map
                       if k in ["fecha", "date", "f"]), None)
     hora_col  = next((col_map[k] for k in col_map
@@ -150,7 +223,6 @@ def _parse_long_format(
         logs.append(f"⚠️ {filename}: no se encontraron columnas Fecha/Hora")
         return pd.DataFrame(), "UNKNOWN", logs
 
-    # Detectar variable y columna de valor
     vtype = _detect_variable("", filename)
     value_col = None
 
@@ -176,7 +248,6 @@ def _parse_long_format(
         logs.append(f"⚠️ {filename}: no se detectó columna de valor")
         return pd.DataFrame(), vtype, logs
 
-    # Construir measured_at combinando Fecha + Hora
     try:
         fecha_str = df[fecha_col].astype(str).str.strip()
         hora_str  = df[hora_col].astype(str).str.strip()
@@ -194,7 +265,7 @@ def _parse_long_format(
     }).dropna().sort_values("measured_at").reset_index(drop=True)
 
     if result.empty:
-        logs.append(f"⚠️ {filename}: formato largo detectado pero sin datos válidos")
+        logs.append(f"⚠️ {filename}: formato largo sin datos válidos")
         return pd.DataFrame(), vtype, logs
 
     logs.append(f"✅ {filename} → {vtype} ({len(result):,} registros, formato largo)")
@@ -217,14 +288,6 @@ def parse_file(
     file_bytes: bytes,
     filename:   str,
 ) -> tuple[pd.DataFrame, str, list[str]]:
-    """
-    Parsea un archivo CSV o Excel meteorológico.
-
-    Retorna:
-        df      DataFrame con columnas [measured_at, value]
-        vtype   Tipo de variable detectado (Temperatura, Humedad, Radiacion, Viento)
-        logs    Lista de mensajes de diagnóstico
-    """
     logs: list[str] = []
     ext = filename.lower()
 
@@ -245,31 +308,33 @@ def _parse_csv(
 
     for enc in ["latin1", "utf-8", "cp1252"]:
         try:
-            # Leer fila 0 para detectar tipo de variable
-            row0 = pd.read_csv(
-                io.BytesIO(file_bytes), sep=";", encoding=enc,
-                header=None, nrows=1
-            )
-            row0_text = " ".join(str(v) for v in row0.iloc[0].values if pd.notna(v))
+            raw_text  = file_bytes.decode(enc, errors="replace")
+            raw_lines = raw_text.splitlines()
+
+            # ── Formato C: metadata en filas 0-3 ─────────────────
+            if _detect_formato_c(raw_lines, ";"):
+                return _parse_formato_c(file_bytes, filename, enc, logs)
+
+            # ── Leer fila 0 para detectar variable (formatos A/B) ─
+            row0_text = raw_lines[0] if raw_lines else ""
             vtype = _detect_variable(row0_text, filename)
 
-            # ── Intentar formatos anchos (A y B) ─────────────────
+            # ── Intentar formatos anchos A y B ────────────────────
             df_b = _try_read_csv(file_bytes, enc, ";", 1)
             _, fmt_b = _detect_hour_cols(df_b) if not df_b.empty else ([], "UNKNOWN")
 
             df_a = _try_read_csv(file_bytes, enc, ";", 0)
             _, fmt_a = _detect_hour_cols(df_a) if not df_a.empty else ([], "UNKNOWN")
 
-            if fmt_b in ("A", "B"):
+            if fmt_b in ("A", "B", "C"):
                 df_use = df_b
-            elif fmt_a in ("A", "B"):
+            elif fmt_a in ("A", "B", "C"):
                 df_use = df_a
                 if vtype == "UNKNOWN":
                     vtype = _detect_variable(
                         " ".join(str(c) for c in df_a.columns), filename)
             else:
-                # ── Fallback: intentar formato largo ─────────────
-                # Probar separador ";" primero, luego ","
+                # ── Fallback: formato largo ───────────────────────
                 for sep in [";", ","]:
                     df_long = _try_read_csv(file_bytes, enc, sep, 0)
                     if df_long.empty or len(df_long.columns) <= 1:
@@ -316,6 +381,28 @@ def _parse_excel(
                 continue
 
             row0_text = " ".join(str(v) for v in raw.iloc[0].values if pd.notna(v))
+
+            # ── Formato C en Excel ────────────────────────────────
+            if _norm(str(raw.iloc[0, 0])).startswith("estacion"):
+                var_text = " ".join(
+                    str(v) for v in raw.iloc[2].values if pd.notna(v)
+                )
+                vtype = _detect_variable(var_text, sname + " " + filename)
+
+                df_c = xl.parse(sname, header=3).dropna(how="all").reset_index(drop=True)
+                df_c = df_c.loc[:, ~df_c.columns.astype(str).str.startswith("Unnamed")]
+                df_c.columns = [str(c).strip() for c in df_c.columns]
+
+                parsed = _wide_to_long(df_c, vtype)
+                if parsed is not None and not parsed.empty:
+                    parsed["measured_at"] = parsed["measured_at"].dt.round("h")
+                    all_frames.append(parsed)
+                    vtype_detected = vtype
+                    logs.append(f"✅ Hoja '{sname}' → {vtype} ({len(parsed):,} registros, Formato C)")
+                else:
+                    logs.append(f"⚠️ Hoja '{sname}' (Formato C): parseado vacío")
+                continue
+
             vtype = _detect_variable(row0_text, sname + " " + filename)
 
             df_b = xl.parse(sname, header=1).dropna(how="all").reset_index(drop=True)
@@ -323,15 +410,14 @@ def _parse_excel(
             df_a = xl.parse(sname, header=0).dropna(how="all").reset_index(drop=True)
             _, fmt_a = _detect_hour_cols(df_a)
 
-            if fmt_b in ("A", "B"):
+            if fmt_b in ("A", "B", "C"):
                 df_use = df_b
-            elif fmt_a in ("A", "B"):
+            elif fmt_a in ("A", "B", "C"):
                 df_use = df_a
                 if vtype == "UNKNOWN":
                     vtype = _detect_variable(
                         " ".join(str(c) for c in df_a.columns), sname)
             else:
-                # Fallback: formato largo en Excel
                 result, vtype, long_logs = _parse_long_format(df_a, sname, [])
                 logs.extend(long_logs)
                 if not result.empty:

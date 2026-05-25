@@ -284,9 +284,90 @@ function SectionOverview({ stationId, dateFrom, dateTo }) {
 }
 
 // ══════════════════════════════════════════════════════════════
-// SECTION B — FDP
-// n_components aplica tanto a gaussianas (T) como a Beta (HR)
+// SECTION B — FDP (versión corregida)
+// Muestra: Fracción · Gauss1 · Gauss2 · ... · SumaGauss
+// igual que el gráfico del Excel de referencia.
 // ══════════════════════════════════════════════════════════════
+
+// ── Paleta de colores para gaussianas individuales ────────────────
+// Índice 0 → naranja (Gauss1), 1 → verde (Gauss2), …  igual al Excel
+const GAUSS_COLORS = [
+  '#f97316', // naranja  – Gauss1
+  '#22c55e', // verde    – Gauss2
+  '#a78bfa', // violeta  – Gauss3
+  '#facc15', // amarillo – Gauss4
+]
+
+const BETA_COLORS = [
+  '#f97316',
+  '#22c55e',
+  '#a78bfa',
+  '#facc15',
+]
+
+// ── Densidad gaussiana puntual ────────────────────────────────────
+function gaussPoint(x, mu, sigma, w, paso) {
+  const exponent = -0.5 * ((x - mu) / sigma) ** 2
+  const pdf = Math.exp(exponent) / (sigma * Math.sqrt(2 * Math.PI))
+  return w * pdf * paso
+}
+
+// ── Densidad beta puntual ─────────────────────────────────────────
+function logGamma(z) {
+  if (z < 0.5) return Math.log(Math.PI / Math.sin(Math.PI * z)) - logGamma(1 - z)
+  z -= 1
+  const g = 7
+  const c = [
+    0.99999999999980993, 676.5203681218851, -1259.1392167224028,
+    771.32342877765313, -176.61502916214059, 12.507343278686905,
+    -0.13857109526572012, 9.9843695780195716e-6, 1.5056327351493116e-7,
+  ]
+  let x = c[0]
+  for (let i = 1; i < g + 2; i++) x += c[i] / (z + i)
+  const t = z + g + 0.5
+  return 0.5 * Math.log(2 * Math.PI) + (z + 0.5) * Math.log(t) - t + Math.log(x)
+}
+
+function betaPDF(x01, alpha, beta) {
+  if (x01 <= 0 || x01 >= 1) return 0
+  const logB = logGamma(alpha) + logGamma(beta) - logGamma(alpha + beta)
+  return Math.exp((alpha - 1) * Math.log(x01) + (beta - 1) * Math.log(1 - x01) - logB)
+}
+
+// ── Enriquecer FDP con columnas por componente ────────────────────
+// paso viene de fdp_resolution que devuelve el backend (más preciso que recalcular).
+// sumaGauss usa point.model del backend para coincidir exactamente con el optimizador.
+// Las gaussianas individuales sí se calculan en el frontend con ese mismo paso.
+function enrichFDPGaussian(fdp, gaussians, paso = 0.1) {
+  if (!fdp?.length || !gaussians?.length) return fdp ?? []
+  return fdp.map(point => {
+    const enriched = { ...point }
+    // SumaGauss = model del backend (parámetros no redondeados → más preciso)
+    enriched.sumaGauss = point.model != null ? parseFloat(point.model.toFixed(7)) : 0
+    // Gaussianas individuales calculadas con el paso real del backend
+    gaussians.forEach((g, i) => {
+      enriched[`gauss${i + 1}`] = parseFloat(gaussPoint(point.x, g.mu, g.sigma, g.w, paso).toFixed(7))
+    })
+    return enriched
+  })
+}
+
+function enrichFDPBeta(fdp, betas, paso01 = 0.01) {
+  if (!fdp?.length || !betas?.length) return fdp ?? []
+  return fdp.map(point => {
+    const x01 = point.x / 100
+    const enriched = { ...point }
+    // SumaGauss (aquí SumaBeta) = model del backend
+    enriched.sumaGauss = point.model != null ? parseFloat(point.model.toFixed(7)) : 0
+    // Betas individuales calculadas con el paso real
+    betas.forEach((b, i) => {
+      const val = b.w * betaPDF(x01, b.alpha, b.beta) * paso01
+      enriched[`beta${i + 1}`] = parseFloat(val.toFixed(7))
+    })
+    return enriched
+  })
+}
+
 const GaussianCards = ({ gaussians, unit }) => (
   <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 14 }}>
     {gaussians.map((g, i) => (
@@ -320,7 +401,6 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
   const [hStats,      setHStats]      = useState(null)
   const [loading,     setLoading]     = useState(false)
   const [error,       setError]       = useState(null)
-  // n_components se aplica tanto a gaussianas (TEMP) como a Beta (HR)
   const [nComponents, setNComponents] = useState(2)
 
   const load = useCallback(async () => {
@@ -336,10 +416,11 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
         measurementsApi.stats({
           station_id: stationId, variable_code: 'HR',
           date_from: dateFrom, date_to: dateTo,
-          n_components: nComponents,   // ← también se pasa a HR
+          n_components: nComponents,
         }),
       ])
-      setTStats(t); setHStats(h)
+      setTStats(t)
+      setHStats(h)
     } catch (e) { setError(e.message) }
     finally { setLoading(false) }
   }, [stationId, dateFrom, dateTo, nComponents])
@@ -348,9 +429,36 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
 
   if (error) return <Err msg={error} />
 
+  // ── Datos enriquecidos con columnas individuales por componente ──
+  // fdp_resolution viene del backend → paso exacto con el que se calculó la FDP
+  const tPaso   = tStats?.fdp_resolution ?? 0.1
+  const hPaso01 = (hStats?.fdp_resolution ?? 1.0) / 100   // backend devuelve 1.0 (%) → convertir a [0,1]
+  const tFdp = tStats ? enrichFDPGaussian(tStats.fdp, tStats.gaussians ?? [], tPaso) : []
+  const hFdp = hStats ? enrichFDPBeta(hStats.fdp, hStats.betas ?? [], hPaso01) : []
+
+  // ── Tooltip personalizado para mostrar todas las series ──────────
+  const CustomTooltip = ({ active, payload, label, unit }) => {
+    if (!active || !payload?.length) return null
+    return (
+      <div style={{
+        background: '#1e293b', border: '1px solid #334155',
+        borderRadius: 8, padding: '10px 14px', fontSize: 11,
+      }}>
+        <div style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 6 }}>
+          {label?.toFixed?.(1) ?? label}{unit}
+        </div>
+        {payload.map((p, i) => (
+          <div key={i} style={{ color: p.color, marginBottom: 2 }}>
+            {p.name}: {typeof p.value === 'number' ? p.value.toFixed(6) : p.value}
+          </div>
+        ))}
+      </div>
+    )
+  }
+
   return (
     <>
-      {/* Control de número de componentes — aplica a T y HR */}
+      {/* Control de número de componentes */}
       <Card style={{ marginBottom: 16, padding: '12px 20px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
           <span style={{ fontSize: 13, color: '#94a3b8', fontWeight: 600 }}>Número de componentes (T y HR):</span>
@@ -371,59 +479,220 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
 
       {loading && <Spinner />}
 
-      {/* FDP Temperatura */}
+      {/* ── FDP Temperatura ─────────────────────────────────────── */}
       {!loading && tStats && (
         <SectionCard
           title="FDP — Temperatura (Gaussianas)"
-          subtitle={`R² = ${tStats.r2?.toFixed(4) ?? '—'} · EMC = ${tStats.mse?.toExponential(2) ?? '—'} · N = ${tStats.n?.toLocaleString()}`}
+          subtitle={
+            `R² = ${tStats.r2?.toFixed(4) ?? '—'} · ` +
+            `EMC = ${tStats.mse?.toExponential(2) ?? '—'} · ` +
+            `N = ${tStats.n?.toLocaleString()} · ` +
+            `Resolución: ${tPaso}°C/bin`
+          }
           badge={<QualityBadge quality={tStats.quality} />}
         >
           <GaussianCards gaussians={tStats.gaussians ?? []} unit="°C" />
-          <ResponsiveContainer width="100%" height={300}>
-            <AreaChart data={tStats.fdp} margin={{ top: 4, right: 8, left: -10, bottom: 0 }}>
+
+          {/* Nota sobre resolución */}
+          <div style={{
+            marginBottom: 12, padding: '6px 12px',
+            background: '#0f172a', borderRadius: 6,
+            fontSize: 11, color: '#64748b', fontFamily: 'monospace',
+          }}>
+            freq[bin] = count[bin] / N_total · paso = {tPaso}°C
+            · modelo(x) = Σ w_i · N(x|μ_i,σ_i) · {tPaso}
+          </div>
+
+          <ResponsiveContainer width="100%" height={340}>
+            <LineChart data={tFdp} margin={{ top: 8, right: 16, left: -10, bottom: 0 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
-              <XAxis dataKey="x" tick={{ fontSize: 10, fill: '#94a3b8' }} unit="°C"
-                interval={Math.ceil((tStats.fdp?.length ?? 1) / 10)} />
-              <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} />
-              <Tooltip contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }}
-                formatter={(v, name) => [typeof v === 'number' ? v.toFixed(5) : v, name]} />
+              <XAxis
+                dataKey="x"
+                tick={{ fontSize: 10, fill: '#94a3b8' }}
+                unit="°C"
+                type="number"
+                domain={['dataMin', 'dataMax']}
+                tickFormatter={v => v?.toFixed(1)}
+                ticks={(() => {
+                  // Ticks cada 1°C para que el eje refleje la resolución 0.1°C/bin
+                  if (!tFdp.length) return []
+                  const mn = Math.ceil(tFdp[0].x)
+                  const mx = Math.floor(tFdp[tFdp.length - 1].x)
+                  const out = []
+                  for (let v = mn; v <= mx; v++) out.push(v)
+                  return out
+                })()}
+              />
+              <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} tickFormatter={v => v.toExponential(1)} />
+              <Tooltip content={<CustomTooltip unit="°C" />} />
               <Legend />
-              <Area type="monotone" dataKey="freq"  name="FDP real"        stroke="#ef4444" fill="#ef444420" strokeWidth={2} dot={false} />
-              <Area type="monotone" dataKey="model" name="Modelo (Σ Gauss)" stroke="#f97316" fill="none"    strokeWidth={2} strokeDasharray="6 3" dot={false} />
+
+              {/* Fracción real — azul oscuro como el Excel */}
+              <Line
+                type="monotone"
+                dataKey="freq"
+                name="Fraccion"
+                stroke="#1e40af"
+                strokeWidth={2}
+                dot={false}
+                isAnimationActive={false}
+              />
+
+              {/* Gaussianas individuales */}
               {(tStats.gaussians ?? []).map((g, i) => (
-                <ReferenceLine key={i} x={g.mu} stroke="#ef444480" strokeDasharray="4 2"
-                  label={{ value: `μ${i+1}=${g.mu?.toFixed(1)}`, fontSize: 9, fill: '#ef4444' }} />
+                <Line
+                  key={`gauss${i + 1}`}
+                  type="monotone"
+                  dataKey={`gauss${i + 1}`}
+                  name={`Gauss${i + 1} (μ=${g.mu?.toFixed(1)}°C, w=${((g.w ?? 0) * 100).toFixed(0)}%)`}
+                  stroke={GAUSS_COLORS[i] ?? '#94a3b8'}
+                  strokeWidth={2}
+                  dot={false}
+                  isAnimationActive={false}
+                />
               ))}
-            </AreaChart>
+
+              {/* Suma de gaussianas — cian como el Excel */}
+              <Line
+                type="monotone"
+                dataKey="sumaGauss"
+                name="SumaGauss"
+                stroke="#06b6d4"
+                strokeWidth={2.5}
+                strokeDasharray="6 3"
+                dot={false}
+                isAnimationActive={false}
+              />
+
+              {/* Líneas verticales en cada μ */}
+              {(tStats.gaussians ?? []).map((g, i) => (
+                <ReferenceLine
+                  key={`ref${i}`}
+                  x={parseFloat(g.mu?.toFixed(1))}
+                  stroke={`${GAUSS_COLORS[i] ?? '#64748b'}80`}
+                  strokeDasharray="4 2"
+                  label={{
+                    value: `μ${i + 1}=${g.mu?.toFixed(1)}°C`,
+                    fontSize: 9,
+                    fill: GAUSS_COLORS[i] ?? '#64748b',
+                    position: 'insideTopRight',
+                  }}
+                />
+              ))}
+            </LineChart>
           </ResponsiveContainer>
+
+          {/* Tabla de métricas de ajuste */}
+          <div style={{ display: 'flex', gap: 16, marginTop: 12, flexWrap: 'wrap' }}>
+            <StatBox label="R²"  value={tStats.r2?.toFixed(4)  ?? '—'} color="#22c55e" />
+            <StatBox label="EMC" value={tStats.mse?.toExponential(2) ?? '—'} color={tStats.quality?.mse_ok ? '#22c55e' : '#ef4444'} />
+            <StatBox label="Err máx" value={tStats.quality?.max_error_range?.toFixed(5) ?? '—'} color={tStats.quality?.error_range_ok ? '#22c55e' : '#ef4444'} />
+            <StatBox label="Σw" value={tStats.quality?.weights_sum?.toFixed(4) ?? '—'} color={tStats.quality?.weights_sum_ok ? '#22c55e' : '#ef4444'} />
+          </div>
         </SectionCard>
       )}
 
-      {/* FDP Humedad */}
+      {/* ── FDP Humedad Relativa ─────────────────────────────────── */}
       {!loading && hStats && (
         <SectionCard
           title="FDP — Humedad Relativa (Beta)"
-          subtitle={`R² = ${hStats.r2?.toFixed(4) ?? '—'} · EMC = ${hStats.mse?.toExponential(2) ?? '—'} · N = ${hStats.n?.toLocaleString()}`}
+          subtitle={
+            `R² = ${hStats.r2?.toFixed(4) ?? '—'} · ` +
+            `EMC = ${hStats.mse?.toExponential(2) ?? '—'} · ` +
+            `N = ${hStats.n?.toLocaleString()} · ` +
+            `Resolución: 1%/bin`
+          }
           badge={<QualityBadge quality={hStats.quality} />}
         >
           <BetaCards betas={hStats.betas ?? []} />
-          <ResponsiveContainer width="100%" height={300}>
-            <AreaChart data={hStats.fdp} margin={{ top: 4, right: 8, left: -10, bottom: 0 }}>
+
+          <div style={{
+            marginBottom: 12, padding: '6px 12px',
+            background: '#0f172a', borderRadius: 6,
+            fontSize: 11, color: '#64748b', fontFamily: 'monospace',
+          }}>
+            freq[bin] = count[bin] / N_total · paso = 1% (escala [0,100])
+            · modelo(x) = Σ w_i · Beta(x/100|α_i,β_i) · 0.01
+          </div>
+
+          <ResponsiveContainer width="100%" height={340}>
+            <LineChart data={hFdp} margin={{ top: 8, right: 16, left: -10, bottom: 0 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
-              <XAxis dataKey="x" tick={{ fontSize: 10, fill: '#94a3b8' }} unit="%"
-                interval={Math.ceil((hStats.fdp?.length ?? 1) / 10)} />
-              <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} />
-              <Tooltip contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }}
-                formatter={(v, name) => [typeof v === 'number' ? v.toFixed(5) : v, name]} />
+              <XAxis
+                dataKey="x"
+                tick={{ fontSize: 10, fill: '#94a3b8' }}
+                unit="%"
+                type="number"
+                domain={['dataMin', 'dataMax']}
+                tickFormatter={v => v?.toFixed(0)}
+                ticks={[0,5,10,15,20,25,30,35,40,45,50,55,60,65,70,75,80,85,90,95,100]}
+              />
+              <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} tickFormatter={v => v.toExponential(1)} />
+              <Tooltip content={<CustomTooltip unit="%" />} />
               <Legend />
-              <Area type="monotone" dataKey="freq"  name="FDP real"       stroke="#3b82f6" fill="#3b82f620" strokeWidth={2} dot={false} />
-              <Area type="monotone" dataKey="model" name="Modelo (Σ Beta)" stroke="#f97316" fill="none"    strokeWidth={2} strokeDasharray="6 3" dot={false} />
+
+              {/* Fracción real — azul oscuro */}
+              <Line
+                type="monotone"
+                dataKey="freq"
+                name="Fraccion"
+                stroke="#1e40af"
+                strokeWidth={2}
+                dot={false}
+                isAnimationActive={false}
+              />
+
+              {/* Betas individuales */}
               {(hStats.betas ?? []).map((b, i) => (
-                <ReferenceLine key={i} x={b.mode} stroke="#3b82f680" strokeDasharray="4 2"
-                  label={{ value: `moda${i+1}=${b.mode?.toFixed(1)}%`, fontSize: 9, fill: '#3b82f6' }} />
+                <Line
+                  key={`beta${i + 1}`}
+                  type="monotone"
+                  dataKey={`beta${i + 1}`}
+                  name={`Beta${i + 1} (moda=${b.mode?.toFixed(1)}%, w=${((b.w ?? 0) * 100).toFixed(0)}%)`}
+                  stroke={BETA_COLORS[i] ?? '#94a3b8'}
+                  strokeWidth={2}
+                  dot={false}
+                  isAnimationActive={false}
+                />
               ))}
-            </AreaChart>
+
+              {/* Suma de betas — cian */}
+              <Line
+                type="monotone"
+                dataKey="sumaGauss"
+                name="SumaBeta"
+                stroke="#06b6d4"
+                strokeWidth={2.5}
+                strokeDasharray="6 3"
+                dot={false}
+                isAnimationActive={false}
+              />
+
+              {/* Líneas verticales en cada moda */}
+              {(hStats.betas ?? []).map((b, i) => (
+                <ReferenceLine
+                  key={`ref${i}`}
+                  x={b.mode}
+                  stroke={`${BETA_COLORS[i] ?? '#64748b'}80`}
+                  strokeDasharray="4 2"
+                  label={{
+                    value: `moda${i + 1}=${b.mode?.toFixed(1)}%`,
+                    fontSize: 9,
+                    fill: BETA_COLORS[i] ?? '#64748b',
+                    position: 'insideTopRight',
+                  }}
+                />
+              ))}
+            </LineChart>
           </ResponsiveContainer>
+
+          {/* Tabla de métricas de ajuste */}
+          <div style={{ display: 'flex', gap: 16, marginTop: 12, flexWrap: 'wrap' }}>
+            <StatBox label="R²"  value={hStats.r2?.toFixed(4)  ?? '—'} color="#22c55e" />
+            <StatBox label="EMC" value={hStats.mse?.toExponential(2) ?? '—'} color={hStats.quality?.mse_ok ? '#22c55e' : '#ef4444'} />
+            <StatBox label="Err máx" value={hStats.quality?.max_error_range?.toFixed(5) ?? '—'} color={hStats.quality?.error_range_ok ? '#22c55e' : '#ef4444'} />
+            <StatBox label="Σw" value={hStats.quality?.weights_sum?.toFixed(4) ?? '—'} color={hStats.quality?.weights_sum_ok ? '#22c55e' : '#ef4444'} />
+          </div>
         </SectionCard>
       )}
     </>
@@ -432,8 +701,6 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
 
 // ══════════════════════════════════════════════════════════════
 // SECTION B.1 — Tabla resumen exportable por estación
-// Columnas del instructivo: número, coordenadas, altura, período,
-// μ/σ/w (gaussianas) o moda/varianza/w (Beta), EMC, R²
 // ══════════════════════════════════════════════════════════════
 function SectionSummaryTable({ dateFrom, dateTo }) {
   const [variable,    setVariable]    = useState('TEMP')
@@ -460,7 +727,6 @@ function SectionSummaryTable({ dateFrom, dateTo }) {
 
   const isHR = variable === 'HR'
 
-  // Construir encabezados dinámicos según n_components
   const compHeaders = Array.from({ length: nComponents }, (_, i) =>
     isHR
       ? [`Moda${i+1}`, `Var${i+1}`, `w${i+1}`]
@@ -600,7 +866,6 @@ function SectionSummaryTable({ dateFrom, dateTo }) {
             </table>
           </div>
 
-          {/* Leyenda de completitud */}
           <div style={{ display: 'flex', gap: 10, marginTop: 14, flexWrap: 'wrap' }}>
             <span style={{ fontSize: 11, color: '#64748b' }}>Completitud:</span>
             {Object.entries(COMPLETITUD_COLORS).map(([key, c]) => (
@@ -1253,7 +1518,6 @@ export default function Analysis() {
     setQueried(false)
   }
 
-  // La tab de tabla resumen no requiere estación seleccionada
   const tabRequiresStation = activeTab !== 'summary-table'
 
   return (

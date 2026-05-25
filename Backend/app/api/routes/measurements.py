@@ -101,14 +101,6 @@ def _apply_date_filters(q, date_from, date_to):
 
 
 def _completitud_color(pct: float) -> str:
-    """
-    Retorna código de color según rangos del instructivo:
-    [100, 98) → verde
-    [98,  95) → azul
-    [95,  90) → amarillo
-    [90,  85) → naranja
-    [85, -)   → rojo
-    """
     if pct >= 98:  return "green"
     if pct >= 95:  return "blue"
     if pct >= 90:  return "yellow"
@@ -117,21 +109,62 @@ def _completitud_color(pct: float) -> str:
 
 
 # ═════════════════════════════════════════════════════════════
-# AJUSTE GAUSSIANO (para T)
+# HELPER INTERNO: construir FDP como fracción simple
+# (igual que la columna "Fracción" del Excel de referencia)
 # ═════════════════════════════════════════════════════════════
 
-def _fit_gaussian_components(fdp: list[dict], n_components: int = 2) -> tuple[list[dict], float | None, float | None, list[dict]]:
+def _build_fdp(values, paso: float) -> list[dict]:
     """
-    Ajusta n_components gaussianas a la FDP de T usando scipy.optimize (SLSQP).
+    Construye la FDP como fracción simple:
+        freq[i] = count_en_bin[i] / total_datos
 
-    Sistema de 3*n_components variables:
-      params = [mu_0, sigma_0, w_0,  mu_1, sigma_1, w_1, ...]
+    Esto es equivalente a la columna "Fracción" del Excel de Javier,
+    donde cada barra representa la proporción de datos en ese bin.
+
+    NO usa density=True de numpy (que devuelve densidad de probabilidad),
+    sino conteo directo dividido por el total.
+    """
+    import numpy as np
+
+    mn = float(np.min(values))
+    mx = float(np.max(values))
+    bins = np.arange(mn, mx + paso, paso)
+
+    counts_hist, edges = np.histogram(values, bins=bins, density=False)
+    centers = ((edges[:-1] + edges[1:]) / 2).round(4)
+    total = counts_hist.sum()
+
+    return [
+        {"x": float(c), "freq": round(float(f) / total, 6)}
+        for c, f in zip(centers, counts_hist)
+    ]
+
+
+# ═════════════════════════════════════════════════════════════
+# AJUSTE GAUSSIANO (para T)
+# Detección de picos por primera derivada (cambio de signo + → -)
+# según indicaciones del coordinador (método del instructivo).
+# ═════════════════════════════════════════════════════════════
+
+def _fit_gaussian_components(
+    fdp: list[dict],
+    n_components: int = 2,
+) -> tuple[list[dict], float | None, float | None, list[dict]]:
+    """
+    Ajusta n_components gaussianas a la FDP de T.
+
+    FDP esperada: fracción simple (freq = count/total), escala [0,1].
+
+    Detección de picos:
+      - Se calcula la primera derivada numérica: dy[i] = y[i+1] - y[i]
+      - Un pico real es donde dy cambia de positivo a negativo (subida → bajada)
+      - Esto evita depender de find_peaks y sus parámetros arbitrarios
+
+    Modelo: suma ponderada de gaussianas × paso (para que integre a fracción)
+      model(x) = Σ w_i · N(x | mu_i, sigma_i) · paso
 
     Criterios del instructivo:
-      - EMC  ≤ 1E-5
-      - R²   > 0.95
-      - Error rango ±1E-3
-      - suma(pesos) = 1 (tolerancia < 1%)
+      EMC ≤ 1E-5 · R² ≥ 0.95 · Error punto a punto ±1E-3 · Σw = 1
 
     Retorna:
       gaussians : lista de dicts {mu, sigma, w}
@@ -140,31 +173,59 @@ def _fit_gaussian_components(fdp: list[dict], n_components: int = 2) -> tuple[li
       fdp_out   : fdp con columnas "model" y "error_range" agregadas
     """
     import numpy as np
-    from scipy.signal import find_peaks
     from scipy.optimize import minimize
 
     x_arr  = np.array([d["x"]    for d in fdp])
     y_real = np.array([d["freq"] for d in fdp])
 
-    # ── Estimación inicial de picos ───────────────────────────
-    peaks_idx, _ = find_peaks(y_real, distance=max(1, len(y_real) // (n_components + 1)))
-    if len(peaks_idx) == 0:
-        peaks_idx = np.argsort(y_real)[-n_components:]
-    peaks_idx = sorted(peaks_idx[np.argsort(y_real[peaks_idx])[-n_components:]])
+    # paso real entre bins (no asumido, calculado desde los datos)
+    paso = float(x_arr[1] - x_arr[0]) if len(x_arr) > 1 else 0.1
 
-    # ── Parámetros iniciales ──────────────────────────────────
+    # ── DETECCIÓN DE PICOS POR PRIMERA DERIVADA ───────────────
+    # dy[i] > 0 → subiendo; dy[i] <= 0 → bajando o plano
+    # Pico donde dy cambia de + a - (índice i+1)
+    dy = np.diff(y_real)
+    peak_candidates = []
+    for i in range(len(dy) - 1):
+        if dy[i] > 0 and dy[i + 1] <= 0:
+            peak_candidates.append(i + 1)
+
+    # Si no hay suficientes picos, completar con los máximos globales restantes
+    if len(peak_candidates) < n_components:
+        mask = np.ones(len(y_real), dtype=bool)
+        for idx in peak_candidates:
+            mask[max(0, idx - 2):min(len(mask), idx + 3)] = False
+        remaining = np.where(mask)[0]
+        if len(remaining) > 0:
+            extra = remaining[np.argsort(y_real[remaining])[::-1]]
+            for e in extra:
+                peak_candidates.append(int(e))
+                if len(peak_candidates) >= n_components:
+                    break
+
+    # Quedarse con los n_components de mayor amplitud, ordenados por posición
+    peak_candidates = sorted(
+        peak_candidates,
+        key=lambda i: y_real[i],
+        reverse=True,
+    )[:n_components]
+    peak_candidates = sorted(peak_candidates)
+
+    # ── PARÁMETROS INICIALES ──────────────────────────────────
     p0 = []
-    for i, idx in enumerate(peaks_idx):
-        mu    = float(x_arr[idx])
-        if i + 1 < len(peaks_idx):
-            sigma = float(abs(x_arr[peaks_idx[i + 1]] - mu) / 2.5)
+    for k, idx in enumerate(peak_candidates):
+        mu = float(x_arr[idx])
+        if k + 1 < len(peak_candidates):
+            sigma = float(abs(x_arr[peak_candidates[k + 1]] - mu) / 2.5)
         else:
             sigma = float((x_arr[-1] - x_arr[0]) / (4 * n_components))
         sigma = max(sigma, 0.3)
         p0.extend([mu, sigma, 1.0 / n_components])
     p0 = np.array(p0, dtype=float)
 
-    # ── Modelo: suma de gaussianas ────────────────────────────
+    # ── MODELO: Σ w_i · N(x|mu_i,sigma_i) · paso ─────────────
+    # Multiplicar por paso convierte densidad → fracción,
+    # igual que en el Excel: Gauss_i = w_i · norm.pdf(x, mu, sigma) · 0.1
     def gauss_pdf(x, mu, sigma):
         return np.exp(-0.5 * ((x - mu) / sigma) ** 2) / (sigma * np.sqrt(2 * np.pi))
 
@@ -172,11 +233,11 @@ def _fit_gaussian_components(fdp: list[dict], n_components: int = 2) -> tuple[li
         total = np.zeros_like(x, dtype=float)
         n = len(params) // 3
         for i in range(n):
-            mu, sigma, w = params[3*i], params[3*i+1], params[3*i+2]
-            total += w * gauss_pdf(x, mu, sigma)
+            mu, sigma, w = params[3 * i], params[3 * i + 1], params[3 * i + 2]
+            total += w * gauss_pdf(x, mu, sigma) * paso
         return total
 
-    # ── Función de costo: MSE ─────────────────────────────────
+    # ── FUNCIÓN DE COSTO: MSE ─────────────────────────────────
     def cost(params):
         sigmas  = params[1::3]
         weights = params[2::3]
@@ -185,7 +246,7 @@ def _fit_gaussian_components(fdp: list[dict], n_components: int = 2) -> tuple[li
         y_hat = model(x_arr, params)
         return float(np.mean((y_real - y_hat) ** 2))
 
-    # ── Restricción: suma(pesos) = 1 ─────────────────────────
+    # ── RESTRICCIÓN: Σ pesos = 1 ─────────────────────────────
     constraints = [{"type": "eq", "fun": lambda p: np.sum(p[2::3]) - 1.0}]
 
     x_min, x_max = float(x_arr.min()), float(x_arr.max())
@@ -200,16 +261,16 @@ def _fit_gaussian_components(fdp: list[dict], n_components: int = 2) -> tuple[li
 
     params_opt = result.x
 
-    # ── Normalizar pesos para que sumen exactamente 1 ─────────
+    # ── NORMALIZAR PESOS ──────────────────────────────────────
     weights = params_opt[2::3].copy()
     weights = np.clip(weights, 0, None)
     weights /= weights.sum()
 
-    # ── Construir gaussianas ──────────────────────────────────
+    # ── CONSTRUIR GAUSSIANAS ──────────────────────────────────
     gaussians = []
     for i in range(n_components):
-        mu    = float(params_opt[3*i])
-        sigma = float(abs(params_opt[3*i + 1]))
+        mu    = float(params_opt[3 * i])
+        sigma = float(abs(params_opt[3 * i + 1]))
         w     = float(weights[i])
         gaussians.append({
             "mu":    round(mu,    3),
@@ -217,10 +278,10 @@ def _fit_gaussian_components(fdp: list[dict], n_components: int = 2) -> tuple[li
             "w":     round(w,     4),
         })
 
-    # ── Métricas de ajuste ────────────────────────────────────
+    # ── MÉTRICAS ──────────────────────────────────────────────
     params_norm = params_opt.copy()
     for i in range(n_components):
-        params_norm[3*i + 2] = float(weights[i])
+        params_norm[3 * i + 2] = float(weights[i])
 
     y_model = model(x_arr, params_norm)
 
@@ -229,7 +290,6 @@ def _fit_gaussian_components(fdp: list[dict], n_components: int = 2) -> tuple[li
     ss_res = float(np.sum((y_real - y_model) ** 2))
     r2     = round(1 - ss_res / ss_tot, 4) if ss_tot > 0 else None
 
-    # Error punto a punto (rango ±1E-3) — se expone en cada punto del FDP
     fdp_out = [
         {
             **d,
@@ -244,45 +304,68 @@ def _fit_gaussian_components(fdp: list[dict], n_components: int = 2) -> tuple[li
 
 # ═════════════════════════════════════════════════════════════
 # AJUSTE BETA (para HR)
+# Detección de picos por primera derivada (igual que gaussianas).
+# FDP en fracción simple; modelo × paso_01 para integrar correctamente.
 # ═════════════════════════════════════════════════════════════
 
-def _fit_beta_components(fdp: list[dict], n_components: int = 2) -> tuple[list[dict], float | None, float | None, list[dict]]:
+def _fit_beta_components(
+    fdp: list[dict],
+    n_components: int = 2,
+) -> tuple[list[dict], float | None, float | None, list[dict]]:
     """
     Ajusta n_components distribuciones Beta a la FDP de HR.
 
-    HR está en [0, 100] → normalizamos a [0, 1] para scipy.stats.beta,
-    luego devolvemos moda, varianza y peso en la escala original (%).
+    HR está en [0,100] → se normaliza a [0,1] para scipy.stats.beta.
+    FDP esperada: fracción simple (freq = count/total).
 
-    n_components es configurable por query param (el instructivo indica que
-    para clima tropical puede haber varias curvas Beta).
+    Modelo: Σ w_i · Beta(x|alpha_i,beta_i) · paso_01
+      donde paso_01 = 0.01 (1% en escala [0,1])
 
-    Retorna:
-      betas   : lista de dicts {alpha, beta, mode, variance, w}
-      r2      : coeficiente de determinación
-      mse     : error medio cuadrático
-      fdp_out : fdp con columnas "model" y "error_range" agregadas
+    n_components es configurable (hasta 8 para clima tropical).
     """
     import numpy as np
     from scipy.stats import beta as beta_dist
-    from scipy.signal import find_peaks
     from scipy.optimize import minimize
 
     x_pct  = np.array([d["x"]    for d in fdp])   # escala 0-100
     y_real = np.array([d["freq"] for d in fdp])
     x_01   = x_pct / 100.0
 
-    # ── Estimación inicial de picos ───────────────────────────
-    peaks_idx, _ = find_peaks(y_real, distance=max(1, len(y_real) // (n_components + 1)))
-    if len(peaks_idx) == 0:
-        peaks_idx = np.argsort(y_real)[-n_components:]
-    peaks_idx = sorted(peaks_idx[np.argsort(y_real[peaks_idx])[-n_components:]])
+    # paso en escala [0,1]
+    paso_01 = float(x_01[1] - x_01[0]) if len(x_01) > 1 else 0.01
 
-    # ── Parámetros iniciales α, β a partir de moda y varianza estimada ──
+    # ── DETECCIÓN DE PICOS POR PRIMERA DERIVADA ───────────────
+    dy = np.diff(y_real)
+    peak_candidates = []
+    for i in range(len(dy) - 1):
+        if dy[i] > 0 and dy[i + 1] <= 0:
+            peak_candidates.append(i + 1)
+
+    if len(peak_candidates) < n_components:
+        mask = np.ones(len(y_real), dtype=bool)
+        for idx in peak_candidates:
+            mask[max(0, idx - 2):min(len(mask), idx + 3)] = False
+        remaining = np.where(mask)[0]
+        if len(remaining) > 0:
+            extra = remaining[np.argsort(y_real[remaining])[::-1]]
+            for e in extra:
+                peak_candidates.append(int(e))
+                if len(peak_candidates) >= n_components:
+                    break
+
+    peak_candidates = sorted(
+        peak_candidates,
+        key=lambda i: y_real[i],
+        reverse=True,
+    )[:n_components]
+    peak_candidates = sorted(peak_candidates)
+
+    # ── PARÁMETROS INICIALES α, β a partir de moda estimada ───
     p0 = []
-    for i, idx in enumerate(peaks_idx):
+    for k, idx in enumerate(peak_candidates):
         mode_01 = float(np.clip(x_01[idx], 0.01, 0.99))
-        if i + 1 < len(peaks_idx):
-            dist = abs(x_01[peaks_idx[i + 1]] - mode_01)
+        if k + 1 < len(peak_candidates):
+            dist = abs(x_01[peak_candidates[k + 1]] - mode_01)
         else:
             dist = 0.15
         var_01  = max((dist / 2.5) ** 2, 0.005)
@@ -292,13 +375,14 @@ def _fit_beta_components(fdp: list[dict], n_components: int = 2) -> tuple[list[d
         p0.extend([alpha0, beta0, 1.0 / n_components])
     p0 = np.array(p0, dtype=float)
 
-    # ── Modelo ────────────────────────────────────────────────
+    # ── MODELO: Σ w_i · Beta(x|a,b) · paso_01 ────────────────
+    # Multiplicar por paso_01 convierte densidad → fracción
     def model(x, params):
-        total = np.zeros_like(x)
+        total = np.zeros_like(x, dtype=float)
         n = len(params) // 3
         for i in range(n):
-            a, b, w = params[3*i], params[3*i+1], params[3*i+2]
-            total += w * beta_dist.pdf(x, a, b) / 100.0
+            a, b, w = params[3 * i], params[3 * i + 1], params[3 * i + 2]
+            total += w * beta_dist.pdf(x, a, b) * paso_01
         return total
 
     def cost(params):
@@ -322,22 +406,22 @@ def _fit_beta_components(fdp: list[dict], n_components: int = 2) -> tuple[list[d
 
     params_opt = result.x
 
-    # ── Normalizar pesos ──────────────────────────────────────
+    # ── NORMALIZAR PESOS ──────────────────────────────────────
     weights = params_opt[2::3].copy()
     weights = np.clip(weights, 0, None)
     weights /= weights.sum()
 
-    # ── Construir componentes Beta ────────────────────────────
+    # ── CONSTRUIR COMPONENTES BETA ────────────────────────────
     betas_out = []
     for i in range(n_components):
-        a = float(params_opt[3*i])
-        b = float(params_opt[3*i+1])
+        a = float(params_opt[3 * i])
+        b = float(params_opt[3 * i + 1])
         w = float(weights[i])
 
-        mode_01 = (a - 1) / (a + b - 2) if (a > 1 and b > 1) else 0.5
+        mode_01  = (a - 1) / (a + b - 2) if (a > 1 and b > 1) else 0.5
         mode_pct = round(float(mode_01 * 100), 2)
-        var_01  = (a * b) / ((a + b) ** 2 * (a + b + 1))
-        var_pct = round(float(var_01 * 10000), 4)
+        var_01   = (a * b) / ((a + b) ** 2 * (a + b + 1))
+        var_pct  = round(float(var_01 * 10000), 4)
 
         betas_out.append({
             "alpha":    round(a, 4),
@@ -347,10 +431,10 @@ def _fit_beta_components(fdp: list[dict], n_components: int = 2) -> tuple[list[d
             "w":        round(w, 4),
         })
 
-    # ── Métricas ──────────────────────────────────────────────
+    # ── MÉTRICAS ──────────────────────────────────────────────
     params_norm = params_opt.copy()
     for i in range(n_components):
-        params_norm[3*i + 2] = float(weights[i])
+        params_norm[3 * i + 2] = float(weights[i])
 
     y_model = model(x_01, params_norm)
 
@@ -371,16 +455,9 @@ def _fit_beta_components(fdp: list[dict], n_components: int = 2) -> tuple[list[d
     return betas_out, r2, round(mse, 8), fdp_out
 
 
-# ─── Función para verificar umbrales del instructivo ─────────
+# ─── Verificación de umbrales del instructivo ─────────────────
 def _quality_flags(mse, r2, fdp_data):
-    """
-    Verifica los 3 criterios de ajuste del instructivo:
-      - EMC  ≤ 1E-5
-      - R²   ≥ 0.95
-      - Error punto a punto en rango ±1E-3
-      - Suma de pesos = 1 (se verifica externamente)
-    """
-    errors = [abs(d.get("error_range", 0)) for d in fdp_data if "error_range" in d]
+    errors  = [abs(d.get("error_range", 0)) for d in fdp_data if "error_range" in d]
     max_err = max(errors) if errors else None
     return {
         "mse_ok":           mse is not None and mse <= 1e-5,
@@ -564,8 +641,8 @@ def get_stats(
     variable_code: str           = Query(...),
     date_from:     Optional[str] = Query(None),
     date_to:       Optional[str] = Query(None),
-    n_components:  int           = Query(2, ge=1, le=6,
-                                         description="Número de componentes gaussianas/beta"),
+    n_components:  int           = Query(2, ge=1, le=8,
+                                         description="Número de componentes gaussianas/beta (hasta 8 para clima tropical)"),
     db: Session = Depends(get_db),
 ):
     import numpy as np
@@ -606,25 +683,18 @@ def get_stats(
     unique, counts = np.unique(bins_mode, return_counts=True)
     mode = float(unique[np.argmax(counts)])
 
-    # Anomalías: |valor - media| > 3σ — se marca cada fila, no solo se cuenta
     anomaly_threshold = 3 * std
-    anomalies_count = int(np.sum(np.abs(values - mean) > anomaly_threshold))
-    anomaly_values  = [
+    anomalies_count   = int(np.sum(np.abs(values - mean) > anomaly_threshold))
+    anomaly_values    = [
         round(float(v), 4)
         for v in values
         if abs(v - mean) > anomaly_threshold
     ]
 
-    # ── FDP ───────────────────────────────────────────────────
+    # ── FDP como fracción simple ──────────────────────────────
+    # Resolución: 0.1°C para T, 1% para HR (según instructivo)
     paso = 0.1 if is_temp else 1.0
-    bins = np.arange(mn, mx + paso, paso)
-    counts_hist, edges = np.histogram(values, bins=bins, density=True)
-    centers = ((edges[:-1] + edges[1:]) / 2).round(2)
-
-    fdp = [
-        {"x": float(c), "freq": round(float(f) * paso, 6)}
-        for c, f in zip(centers, counts_hist)
-    ]
+    fdp  = _build_fdp(values, paso)
 
     # ── Completitud ───────────────────────────────────────────
     date_start    = rows[0].measured_at
@@ -634,14 +704,14 @@ def get_stats(
     completitud_color = _completitud_color(completitud)
 
     # ═══════════════════════════════════════════════════════════
-    # RAMA HR — ajuste Beta (n_components configurable)
+    # RAMA HR — ajuste Beta
     # ═══════════════════════════════════════════════════════════
     if is_hr:
         betas, r2, mse, fdp_fitted = ([], None, None, fdp) if len(fdp) <= 4 else \
             _fit_beta_components(fdp, n_components=n_components)
 
-        w_sum  = round(sum(b["w"] for b in betas), 4)
-        w_ok   = abs(w_sum - 1.0) < 0.01
+        w_sum = round(sum(b["w"] for b in betas), 4)
+        w_ok  = abs(w_sum - 1.0) < 0.01
 
         quality = _quality_flags(mse, r2, fdp_fitted)
         quality["weights_sum"]    = w_sum
@@ -660,12 +730,13 @@ def get_stats(
             "completitud_pct":    completitud,
             "completitud_color":  completitud_color,
             "anomalies_count":    anomalies_count,
-            "anomaly_values":     anomaly_values[:50],  # primeros 50 para no sobrecargar
+            "anomaly_values":     anomaly_values[:50],
             "anomaly_threshold":  round(anomaly_threshold, 4),
             "date_start":         str(date_start),
             "date_end":           str(date_end),
             "distribution":       "beta",
             "n_components":       n_components,
+            "fdp_resolution":     paso,           # resolución visible en frontend
             "fdp":                fdp_fitted,
             "betas":              betas,
             "gaussians":          [],
@@ -675,7 +746,7 @@ def get_stats(
         }
 
     # ═══════════════════════════════════════════════════════════
-    # RAMA TEMP — ajuste Gaussiano (scipy.optimize SLSQP)
+    # RAMA TEMP — ajuste Gaussiano
     # ═══════════════════════════════════════════════════════════
     gaussians, r2, mse, fdp_fitted = ([], None, None, fdp) if len(fdp) <= 4 else \
         _fit_gaussian_components(fdp, n_components=n_components)
@@ -706,6 +777,7 @@ def get_stats(
         "date_end":           str(date_end),
         "distribution":       "gaussian",
         "n_components":       n_components,
+        "fdp_resolution":     paso,               # resolución visible en frontend
         "fdp":                fdp_fitted,
         "gaussians":          gaussians,
         "betas":              [],
@@ -716,9 +788,7 @@ def get_stats(
 
 
 # ═════════════════════════════════════════════════════════════
-# GET /stats/summary-table  — Tabla exportable b.1 del instructivo
-# Columnas: estación, coordenadas, altura, período, μ/σ/w (gaussianas)
-#           o moda/varianza/w (Beta), EMC, R²
+# GET /stats/summary-table
 # ═════════════════════════════════════════════════════════════
 
 @router.get("/stats/summary-table")
@@ -726,21 +796,15 @@ def get_stats_summary_table(
     variable_code: str           = Query(..., description="TEMP o HR"),
     date_from:     Optional[str] = Query(None),
     date_to:       Optional[str] = Query(None),
-    n_components:  int           = Query(2, ge=1, le=6),
+    n_components:  int           = Query(2, ge=1, le=8),
     db: Session = Depends(get_db),
 ):
-    """
-    Genera la tabla resumen del instructivo (b.1) para todas las estaciones.
-    Para TEMP: número, coordenadas, altura, período, μ/σ/w de cada gaussiana, EMC, R².
-    Para HR:   número, coordenadas, altura, período, moda/varianza/w de cada Beta, EMC, R².
-
-    Útil para exportar a Excel/PDF.
-    """
     import numpy as np
 
     stations = db.query(Station).order_by(Station.station_code).all()
-    vc = variable_code.strip().upper()
+    vc    = variable_code.strip().upper()
     is_hr = vc == "HR"
+    paso  = 1.0 if is_hr else 0.1
 
     rows_out = []
     for station in stations:
@@ -761,21 +825,15 @@ def get_stats_summary_table(
         if len(values) < 10:
             continue
 
-        n    = len(values)
+        n      = len(values)
         mean_v = float(np.mean(values))
         std_v  = float(np.std(values))
-        mn_v   = float(np.min(values))
-        mx_v   = float(np.max(values))
 
-        paso = 0.1 if not is_hr else 1.0
-        bins = np.arange(mn_v, mx_v + paso, paso)
-        counts_hist, edges = np.histogram(values, bins=bins, density=True)
-        centers = ((edges[:-1] + edges[1:]) / 2).round(2)
-        fdp = [{"x": float(c), "freq": round(float(f) * paso, 6)}
-               for c, f in zip(centers, counts_hist)]
+        # FDP como fracción simple (igual que en /stats)
+        fdp = _build_fdp(values, paso)
 
-        date_start = meas[0].measured_at
-        date_end   = meas[-1].measured_at
+        date_start    = meas[0].measured_at
+        date_end      = meas[-1].measured_at
         horas_totales = max(int((date_end - date_start).total_seconds() / 3600) + 1, 1)
         completitud   = round(n / horas_totales * 100, 2)
 
@@ -792,6 +850,7 @@ def get_stats_summary_table(
             "completitud_color": _completitud_color(completitud),
             "mean":              round(mean_v, 4),
             "std":               round(std_v,  4),
+            "fdp_resolution":    paso,
         }
 
         if len(fdp) <= 4:
@@ -802,16 +861,16 @@ def get_stats_summary_table(
             w_sum   = round(sum(b["w"] for b in betas), 4)
             quality["weights_sum"]    = w_sum
             quality["weights_sum_ok"] = abs(w_sum - 1.0) < 0.01
-            row.update({"r2": r2, "mse": mse, "components": betas, "quality": quality,
-                        "distribution": "beta"})
+            row.update({"r2": r2, "mse": mse, "components": betas,
+                        "quality": quality, "distribution": "beta"})
         else:
             gaussians, r2, mse, fdp_fit = _fit_gaussian_components(fdp, n_components=n_components)
             quality = _quality_flags(mse, r2, fdp_fit)
             w_sum   = round(sum(g["w"] for g in gaussians), 4)
             quality["weights_sum"]    = w_sum
             quality["weights_sum_ok"] = abs(w_sum - 1.0) < 0.01
-            row.update({"r2": r2, "mse": mse, "components": gaussians, "quality": quality,
-                        "distribution": "gaussian"})
+            row.update({"r2": r2, "mse": mse, "components": gaussians,
+                        "quality": quality, "distribution": "gaussian"})
 
         rows_out.append(row)
 
@@ -823,15 +882,14 @@ def get_stats_summary_table(
 
 
 # ═════════════════════════════════════════════════════════════
-# GET /heatmap  — matriz mes × hora  O  mes × semana
+# GET /heatmap
 # ═════════════════════════════════════════════════════════════
 
 @router.get("/heatmap")
 def get_heatmap(
     station_id:    str           = Query(...),
     variable_code: str           = Query(...),
-    group_by:      str           = Query("hour", regex="^(hour|week)$",
-                                         description="Eje secundario: hora del día (hour) o semana del mes (week)"),
+    group_by:      str           = Query("hour", regex="^(hour|week)$"),
     date_from:     Optional[str] = Query(None),
     date_to:       Optional[str] = Query(None),
     db: Session = Depends(get_db),
@@ -858,7 +916,6 @@ def get_heatmap(
     df["mes"] = df["measured_at"].dt.month
 
     if group_by == "week":
-        # Semana dentro del mes (1-5)
         df["eje"] = ((df["measured_at"].dt.day - 1) // 7 + 1)
         eje_label = "semana_mes"
         eje_range = list(range(1, 6))
@@ -886,7 +943,7 @@ def get_heatmap(
 
 
 # ═════════════════════════════════════════════════════════════
-# GET /daily-profile  — c.2) Variación diaria promedio por mes
+# GET /daily-profile
 # ═════════════════════════════════════════════════════════════
 
 @router.get("/daily-profile")
@@ -897,100 +954,6 @@ def get_daily_profile(
     date_to:       Optional[str] = Query(None),
     db: Session = Depends(get_db),
 ):
-    """
-    Perfil diario promedio (c.2 del instructivo).
-
-    Para T  → estadísticos por hora: max, min, avg, moda, Q25, Q75
-    Para HR → mismos estadísticos usando moda como estadístico principal
-
-    Retorna:
-      annual  : lista de 24 puntos (todo el período)
-      monthly : dict mes→lista de 24 puntos  (mes 1..12)
-    """
-    import numpy as np
-    import pandas as pd
-
-    q = (
-        db.query(Measurement)
-        .join(Measurement.variable)
-        .filter(Measurement.station_id == station_id)
-        .filter(func.upper(Variable.code) == variable_code.strip().upper())
-    )
-    q = _apply_date_filters(q, date_from, date_to)
-    rows = q.order_by(Measurement.measured_at.asc()).all()
-
-    if not rows:
-        raise HTTPException(status_code=404, detail="Sin datos para los filtros indicados")
-
-    is_hr   = variable_code.strip().upper() == "HR"
-    step    = 1.0 if is_hr else 0.1
-
-    df = pd.DataFrame([
-        {"measured_at": r.measured_at, "value": float(r.value)}
-        for r in rows
-    ])
-    df["measured_at"] = pd.to_datetime(df["measured_at"])
-    df["mes"]  = df["measured_at"].dt.month
-    df["hora"] = df["measured_at"].dt.hour
-
-    def _mode(series):
-        vals = series.dropna()
-        if len(vals) == 0:
-            return None
-        bins  = np.round(vals.values / step) * step
-        u, c  = np.unique(bins, return_counts=True)
-        return round(float(u[np.argmax(c)]), 2)
-
-    def _profile(subset: pd.DataFrame) -> list[dict]:
-        result = []
-        for h in range(24):
-            grp = subset[subset["hora"] == h]["value"]
-            if len(grp) == 0:
-                result.append({"hora": h, "avg": None, "min": None,
-                                "max": None, "mode": None, "q25": None, "q75": None})
-                continue
-            result.append({
-                "hora": h,
-                "avg":  round(float(grp.mean()),           3),
-                "min":  round(float(grp.min()),            3),
-                "max":  round(float(grp.max()),            3),
-                "mode": _mode(grp),
-                "q25":  round(float(grp.quantile(0.25)),   3),
-                "q75":  round(float(grp.quantile(0.75)),   3),
-            })
-        return result
-
-    annual  = _profile(df)
-    monthly = {str(m): _profile(df[df["mes"] == m]) for m in range(1, 13)}
-
-    return {
-        "variable_code": variable_code.strip().upper(),
-        "is_hr":         is_hr,
-        "annual":        annual,
-        "monthly":       monthly,
-    }
-
-
-# ═════════════════════════════════════════════════════════════
-# GET /annual-profile  — c.3) Variación anual promedio
-# ═════════════════════════════════════════════════════════════
-
-@router.get("/annual-profile")
-def get_annual_profile(
-    station_id:    str           = Query(...),
-    variable_code: str           = Query(...),
-    date_from:     Optional[str] = Query(None),
-    date_to:       Optional[str] = Query(None),
-    db: Session = Depends(get_db),
-):
-    """
-    Variación anual promedio (c.3 del instructivo).
-
-    Para T  → media diaria (y bandas min/max/q25/q75) a lo largo del año
-    Para HR → moda diaria (y bandas) a lo largo del año
-
-    El eje X es el día del año (1-366), promediado sobre todos los años del período.
-    """
     import numpy as np
     import pandas as pd
 
@@ -1014,7 +977,83 @@ def get_annual_profile(
         for r in rows
     ])
     df["measured_at"] = pd.to_datetime(df["measured_at"])
-    df["doy"]  = df["measured_at"].dt.dayofyear  # 1-366
+    df["mes"]  = df["measured_at"].dt.month
+    df["hora"] = df["measured_at"].dt.hour
+
+    def _mode(series):
+        vals = series.dropna()
+        if len(vals) == 0:
+            return None
+        bins = np.round(vals.values / step) * step
+        u, c = np.unique(bins, return_counts=True)
+        return round(float(u[np.argmax(c)]), 2)
+
+    def _profile(subset: pd.DataFrame) -> list[dict]:
+        result = []
+        for h in range(24):
+            grp = subset[subset["hora"] == h]["value"]
+            if len(grp) == 0:
+                result.append({"hora": h, "avg": None, "min": None,
+                                "max": None, "mode": None, "q25": None, "q75": None})
+                continue
+            result.append({
+                "hora": h,
+                "avg":  round(float(grp.mean()),         3),
+                "min":  round(float(grp.min()),          3),
+                "max":  round(float(grp.max()),          3),
+                "mode": _mode(grp),
+                "q25":  round(float(grp.quantile(0.25)), 3),
+                "q75":  round(float(grp.quantile(0.75)), 3),
+            })
+        return result
+
+    annual  = _profile(df)
+    monthly = {str(m): _profile(df[df["mes"] == m]) for m in range(1, 13)}
+
+    return {
+        "variable_code": variable_code.strip().upper(),
+        "is_hr":         is_hr,
+        "annual":        annual,
+        "monthly":       monthly,
+    }
+
+
+# ═════════════════════════════════════════════════════════════
+# GET /annual-profile
+# ═════════════════════════════════════════════════════════════
+
+@router.get("/annual-profile")
+def get_annual_profile(
+    station_id:    str           = Query(...),
+    variable_code: str           = Query(...),
+    date_from:     Optional[str] = Query(None),
+    date_to:       Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    import numpy as np
+    import pandas as pd
+
+    q = (
+        db.query(Measurement)
+        .join(Measurement.variable)
+        .filter(Measurement.station_id == station_id)
+        .filter(func.upper(Variable.code) == variable_code.strip().upper())
+    )
+    q = _apply_date_filters(q, date_from, date_to)
+    rows = q.order_by(Measurement.measured_at.asc()).all()
+
+    if not rows:
+        raise HTTPException(status_code=404, detail="Sin datos para los filtros indicados")
+
+    is_hr = variable_code.strip().upper() == "HR"
+    step  = 1.0 if is_hr else 0.1
+
+    df = pd.DataFrame([
+        {"measured_at": r.measured_at, "value": float(r.value)}
+        for r in rows
+    ])
+    df["measured_at"] = pd.to_datetime(df["measured_at"])
+    df["doy"]  = df["measured_at"].dt.dayofyear
     df["date"] = df["measured_at"].dt.date
 
     def _mode_val(arr):
@@ -1024,13 +1063,12 @@ def get_annual_profile(
         u, c = np.unique(bins, return_counts=True)
         return round(float(u[np.argmax(c)]), 2)
 
-    # Estadístico diario por día calendario
     daily_records = []
     for date, grp in df.groupby("date"):
         vals = grp["value"].dropna().values
         if len(vals) == 0:
             continue
-        doy = grp["doy"].iloc[0]
+        doy     = grp["doy"].iloc[0]
         primary = _mode_val(vals) if is_hr else round(float(np.mean(vals)), 3)
         daily_records.append({
             "doy":     doy,
@@ -1043,7 +1081,6 @@ def get_annual_profile(
 
     daily_df = pd.DataFrame(daily_records)
 
-    # Promediar por día del año sobre todos los años
     result = []
     for doy in range(1, 367):
         subset = daily_df[daily_df["doy"] == doy]
@@ -1070,7 +1107,7 @@ def get_annual_profile(
 
 
 # ═════════════════════════════════════════════════════════════
-# GET /combined  — densidad T×HR, humedad absoluta, humectación
+# GET /combined
 # ═════════════════════════════════════════════════════════════
 
 @router.get("/combined")
@@ -1128,10 +1165,9 @@ def get_combined(
     df = pd.DataFrame(joined)
     df["measured_at"] = pd.to_datetime(df["measured_at"])
 
-    # ── Densidad T×HR con bins configurables ─────────────────
-    # T en enteros (±0.5°C), HR en bins de 5% (±2.5%)
-    df["T_bin"]  = (df["T"]  / 1).round() * 1
-    df["HR_bin"] = (df["HR"] / 5).round() * 5
+    # Densidad T×HR con resolución 0.1°C × 1%
+    df["T_bin"]  = (df["T"]  / 0.1).round() * 0.1
+    df["HR_bin"] = (df["HR"] / 1.0).round() * 1.0
     density_raw = (
         df.groupby(["T_bin", "HR_bin"]).size().reset_index(name="count")
         .rename(columns={"T_bin": "T", "HR_bin": "HR"})
@@ -1139,7 +1175,6 @@ def get_combined(
     total_pts = len(df)
     density_raw["pct"] = (density_raw["count"] / total_pts * 100).round(3)
 
-    # ── Contornos al 90/95/99% (densidad acumulada desde el centro) ──
     density_sorted = density_raw.sort_values("count", ascending=False).copy()
     density_sorted["cum_pct"] = density_sorted["count"].cumsum() / total_pts * 100
     density_raw_merged = density_raw.merge(
@@ -1155,13 +1190,10 @@ def get_combined(
     density_raw_merged["contour"] = density_raw_merged["cum_pct"].apply(_contour_level)
     density = density_raw_merged.to_dict(orient="records")
 
-    # ── Tiempo de humectación (T>10°C y HR>79%) ──────────────
     humect_mask  = (df["T"] > 10) & (df["HR"] > 79)
     humect_count = int(humect_mask.sum())
     humect_pct   = round(humect_count / total_pts * 100, 2)
 
-    # ── Movilidad del flujo: distribución horaria T y HR por mes ──
-    # Establece cuándo ocurren los máximos en el año (instructivo d.1)
     mobility = []
     for mes in range(1, 13):
         sub = df[df["mes"] == mes]
@@ -1180,7 +1212,6 @@ def get_combined(
                 "HR_max": round(float(h_sub["HR"].max()),  2),
             })
 
-    # ── Serie mensual H_abs ───────────────────────────────────
     df_habs = df.dropna(subset=["habs"]).copy()
     df_habs["period"] = df_habs["measured_at"].dt.to_period("M").dt.to_timestamp()
     habs_monthly = (
@@ -1232,7 +1263,7 @@ def create_measurement(
     payload: MeasurementIn,
     db: Session = Depends(get_db),
 ):
-    station  = db.query(Station).filter(Station.id == payload.station_id).first()
+    station = db.query(Station).filter(Station.id == payload.station_id).first()
     if not station:
         raise HTTPException(status_code=404, detail=f"Estación '{payload.station_id}' no encontrada.")
 

@@ -1,14 +1,16 @@
 # 🌤️ Aplicación de Análisis Meteorológico
 
 Herramienta de depuración, modelado y visualización de datos de estaciones
-meteorológicas, basada en el instructivo de Javier Rodríguez Yáñez / Ugalde et al.
-
+meteorológicas.
 ---
 
-## ⚡ Instalación rápida
+## Instalación rápida
 
 ```bash
-pip install streamlit pandas numpy scipy plotly openpyxl
+pip install -r requirements.txt
+
+uvicorn app.main:app --reload
+
 ```
 
 ---
@@ -16,23 +18,12 @@ pip install streamlit pandas numpy scipy plotly openpyxl
 ## ▶️ Ejecutar la aplicación
 
 ```bash
-cd meteo_app
-streamlit run app.py
+cd Frontend
+npm install
+npm run dev
 ```
 
-Se abrirá automáticamente en tu navegador en **http://localhost:8501**
-
----
-
-## 🧪 Generar datos de prueba
-
-Si aún no tienes datos, ejecuta:
-
-```bash
-python generar_datos_prueba.py
-```
-
-Esto crea `datos_prueba.csv` con ~87,600 filas (10 años de datos horarios).
+Se abrirá en el localhost
 
 ---
 
