@@ -4,7 +4,8 @@ from app.api.routes import (
     stations,
     uploads,
     measurements,
-    analysis
+    analysis, 
+    local_analysis
 )
 
 api_router = APIRouter()
@@ -31,4 +32,10 @@ api_router.include_router(
     analysis.router,
     prefix="/stations",
     tags=["analysis"]
+)
+
+api_router.include_router(
+    local_analysis.router,   
+    prefix="/local-analysis", 
+    tags=["local-analysis"]
 )
