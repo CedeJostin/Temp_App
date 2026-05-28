@@ -40,16 +40,12 @@ const COMPLETITUD_COLORS = {
 }
 
 // ── Paleta FDP igual al Excel ─────────────────────────────────
-// Frec norm  → rojo
-// Suma       → blanco suave (visible en fondo oscuro, equivale al negro del Excel)
-// Gaussianas individuales (T)
 const GAUSS_COLORS = [
   '#f97316', // naranja  – Gauss1
   '#22c55e', // verde    – Gauss2
   '#a78bfa', // violeta  – Gauss3
   '#facc15', // amarillo – Gauss4
 ]
-// Betas individuales (HR): gris, amarillo, celeste, verde, morado (igual al Excel)
 const BETA_COLORS = [
   '#94a3b8', // gris     – Beta1
   '#eab308', // amarillo – Beta2
@@ -57,9 +53,7 @@ const BETA_COLORS = [
   '#4ade80', // verde    – Beta4
   '#c084fc', // morado   – Beta5
 ]
-// Color de la línea suma (negro del Excel → blanco suave en dark mode)
 const FDP_SUMA_COLOR  = '#e2e8f0'
-// Color de Frec norm (rojo en ambas gráficas, igual al Excel)
 const FDP_FREC_COLOR  = '#ef4444'
 
 // ── UI helpers ────────────────────────────────────────────────
@@ -306,10 +300,6 @@ function SectionOverview({ stationId, dateFrom, dateTo }) {
 
 // ══════════════════════════════════════════════════════════════
 // SECTION B — FDP
-// Colores corregidos para coincidir con el Excel de referencia:
-//   Frec norm  → rojo  (#ef4444)
-//   Gauss/Beta suma → blanco suave grueso y sólido (equivale al negro del Excel)
-//   Componentes individuales → paletas GAUSS_COLORS / BETA_COLORS
 // ══════════════════════════════════════════════════════════════
 
 function gaussPoint(x, mu, sigma, w, paso) {
@@ -403,12 +393,12 @@ const BetaCards = ({ betas }) => (
   </div>
 )
 
+// CAMBIO 1 + 2: selector eliminado, valores fijos (T→2, HR→5)
 function SectionFDP({ stationId, dateFrom, dateTo }) {
-  const [tStats,      setTStats]      = useState(null)
-  const [hStats,      setHStats]      = useState(null)
-  const [loading,     setLoading]     = useState(false)
-  const [error,       setError]       = useState(null)
-  const [nComponents, setNComponents] = useState(2)
+  const [tStats,  setTStats]  = useState(null)
+  const [hStats,  setHStats]  = useState(null)
+  const [loading, setLoading] = useState(false)
+  const [error,   setError]   = useState(null)
 
   const load = useCallback(async () => {
     if (!stationId) return
@@ -418,19 +408,19 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
         measurementsApi.stats({
           station_id: stationId, variable_code: 'TEMP',
           date_from: dateFrom, date_to: dateTo,
-          n_components: nComponents,
+          n_components: 2,
         }),
         measurementsApi.stats({
           station_id: stationId, variable_code: 'HR',
           date_from: dateFrom, date_to: dateTo,
-          n_components: nComponents,
+          n_components: 5,
         }),
       ])
       setTStats(t)
       setHStats(h)
     } catch (e) { setError(e.message) }
     finally { setLoading(false) }
-  }, [stationId, dateFrom, dateTo, nComponents])
+  }, [stationId, dateFrom, dateTo])
 
   useEffect(() => { load() }, [load])
 
@@ -441,7 +431,6 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
   const tFdp = tStats ? enrichFDPGaussian(tStats.fdp, tStats.gaussians ?? [], tPaso) : []
   const hFdp = hStats ? enrichFDPBeta(hStats.fdp, hStats.betas ?? [], hPaso01) : []
 
-  // Tooltip personalizado
   const CustomTooltip = ({ active, payload, label, unit }) => {
     if (!active || !payload?.length) return null
     return (
@@ -461,15 +450,12 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
     )
   }
 
-  // Leyenda personalizada para mostrar colores correctos
   const FDPLegend = ({ components, colors, sumaLabel, isGauss }) => (
     <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 8, fontSize: 11, alignItems: 'center' }}>
-      {/* Frec norm */}
       <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
         <svg width="24" height="4"><line x1="0" y1="2" x2="24" y2="2" stroke={FDP_FREC_COLOR} strokeWidth="2"/></svg>
         <span style={{ color: '#94a3b8' }}>Frec norm</span>
       </span>
-      {/* Componentes individuales */}
       {components.map((c, i) => (
         <span key={i} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
           <svg width="24" height="4"><line x1="0" y1="2" x2="24" y2="2" stroke={colors[i] ?? '#94a3b8'} strokeWidth="1.5"/></svg>
@@ -481,7 +467,6 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
           </span>
         </span>
       ))}
-      {/* Suma */}
       <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
         <svg width="24" height="5"><line x1="0" y1="2.5" x2="24" y2="2.5" stroke={FDP_SUMA_COLOR} strokeWidth="3"/></svg>
         <span style={{ color: '#94a3b8' }}>{sumaLabel}</span>
@@ -491,25 +476,6 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
 
   return (
     <>
-      {/* Control de número de componentes */}
-      <Card style={{ marginBottom: 16, padding: '12px 20px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
-          <span style={{ fontSize: 13, color: '#94a3b8', fontWeight: 600 }}>Número de componentes (T y HR):</span>
-          {[1, 2, 3, 4].map(n => (
-            <button key={n} onClick={() => setNComponents(n)} style={{
-              padding: '4px 14px', borderRadius: 20, border: '1px solid',
-              fontSize: 13, cursor: 'pointer',
-              background:   nComponents === n ? '#6366f1' : 'transparent',
-              borderColor:  nComponents === n ? '#6366f1' : '#334155',
-              color:        nComponents === n ? '#fff'    : '#94a3b8',
-            }}>{n}</button>
-          ))}
-          <span style={{ fontSize: 11, color: '#64748b' }}>
-            Clima monzónico → 2 gaussianas. Clima tropical → varias Beta.
-          </span>
-        </div>
-      </Card>
-
       {loading && <Spinner />}
 
       {/* ── FDP Temperatura ─────────────────────────────────────── */}
@@ -563,67 +529,22 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
               />
               <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} tickFormatter={v => v.toExponential(1)} />
               <Tooltip content={<CustomTooltip unit="°C" />} />
-              {/* SIN Legend de recharts — usamos FDPLegend propio arriba */}
 
-              {/* ── Frec norm: ROJA (igual al Excel) ── */}
-              <Line
-                type="monotone"
-                dataKey="freq"
-                name="Frec norm"
-                stroke={FDP_FREC_COLOR}
-                strokeWidth={2}
-                dot={false}
-                isAnimationActive={false}
-                legendType="none"
-              />
+              <Line type="monotone" dataKey="freq" name="Frec norm" stroke={FDP_FREC_COLOR} strokeWidth={2} dot={false} isAnimationActive={false} legendType="none" />
 
-              {/* ── Gaussianas individuales ── */}
               {(tStats.gaussians ?? []).map((g, i) => (
-                <Line
-                  key={`gauss${i + 1}`}
-                  type="monotone"
-                  dataKey={`gauss${i + 1}`}
-                  name={`Gauss ${i + 1}`}
-                  stroke={GAUSS_COLORS[i] ?? '#94a3b8'}
-                  strokeWidth={1.5}
-                  dot={false}
-                  isAnimationActive={false}
-                  legendType="none"
-                />
+                <Line key={`gauss${i + 1}`} type="monotone" dataKey={`gauss${i + 1}`} name={`Gauss ${i + 1}`} stroke={GAUSS_COLORS[i] ?? '#94a3b8'} strokeWidth={1.5} dot={false} isAnimationActive={false} legendType="none" />
               ))}
 
-              {/* ── Suma gaussianas: BLANCA GRUESA SÓLIDA (negro del Excel) ── */}
-              <Line
-                type="monotone"
-                dataKey="sumaGauss"
-                name="Gauss suma"
-                stroke={FDP_SUMA_COLOR}
-                strokeWidth={3}
-                strokeDasharray=""
-                dot={false}
-                isAnimationActive={false}
-                legendType="none"
-              />
+              <Line type="monotone" dataKey="sumaGauss" name="Gauss suma" stroke={FDP_SUMA_COLOR} strokeWidth={3} strokeDasharray="" dot={false} isAnimationActive={false} legendType="none" />
 
-              {/* Líneas verticales en cada μ */}
               {(tStats.gaussians ?? []).map((g, i) => (
-                <ReferenceLine
-                  key={`ref${i}`}
-                  x={parseFloat(g.mu?.toFixed(1))}
-                  stroke={`${GAUSS_COLORS[i] ?? '#64748b'}80`}
-                  strokeDasharray="4 2"
-                  label={{
-                    value: `μ${i + 1}=${g.mu?.toFixed(1)}°C`,
-                    fontSize: 9,
-                    fill: GAUSS_COLORS[i] ?? '#64748b',
-                    position: 'insideTopRight',
-                  }}
-                />
+                <ReferenceLine key={`ref${i}`} x={parseFloat(g.mu?.toFixed(1))} stroke={`${GAUSS_COLORS[i] ?? '#64748b'}80`} strokeDasharray="4 2"
+                  label={{ value: `μ${i + 1}=${g.mu?.toFixed(1)}°C`, fontSize: 9, fill: GAUSS_COLORS[i] ?? '#64748b', position: 'insideTopRight' }} />
               ))}
             </LineChart>
           </ResponsiveContainer>
 
-          {/* Métricas de ajuste */}
           <div style={{ display: 'flex', gap: 16, marginTop: 12, flexWrap: 'wrap' }}>
             <StatBox label="R²"      value={tStats.r2?.toFixed(4)  ?? '—'} color="#22c55e" />
             <StatBox label="EMC"     value={tStats.mse?.toExponential(2) ?? '—'} color={tStats.quality?.mse_ok ? '#22c55e' : '#ef4444'} />
@@ -666,77 +587,25 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
           <ResponsiveContainer width="100%" height={340}>
             <LineChart data={hFdp} margin={{ top: 8, right: 16, left: -10, bottom: 0 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#334155" strokeOpacity={0.5} />
-              <XAxis
-                dataKey="x"
-                tick={{ fontSize: 10, fill: '#94a3b8' }}
-                unit="%"
-                type="number"
-                domain={[0, 100]}
-                tickFormatter={v => v?.toFixed(0)}
-                ticks={[0,10,20,30,40,50,60,70,80,90,100]}
-              />
+              <XAxis dataKey="x" tick={{ fontSize: 10, fill: '#94a3b8' }} unit="%" type="number" domain={[0, 100]} tickFormatter={v => v?.toFixed(0)} ticks={[0,10,20,30,40,50,60,70,80,90,100]} />
               <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} tickFormatter={v => v.toExponential(1)} />
               <Tooltip content={<CustomTooltip unit="%" />} />
 
-              {/* ── Frec norm: ROJA ── */}
-              <Line
-                type="monotone"
-                dataKey="freq"
-                name="Frec norm"
-                stroke={FDP_FREC_COLOR}
-                strokeWidth={2}
-                dot={false}
-                isAnimationActive={false}
-                legendType="none"
-              />
+              <Line type="monotone" dataKey="freq" name="Frec norm" stroke={FDP_FREC_COLOR} strokeWidth={2} dot={false} isAnimationActive={false} legendType="none" />
 
-              {/* ── Betas individuales ── */}
               {(hStats.betas ?? []).map((b, i) => (
-                <Line
-                  key={`beta${i + 1}`}
-                  type="monotone"
-                  dataKey={`beta${i + 1}`}
-                  name={`Beta ${i + 1}`}
-                  stroke={BETA_COLORS[i] ?? '#94a3b8'}
-                  strokeWidth={1.5}
-                  dot={false}
-                  isAnimationActive={false}
-                  legendType="none"
-                />
+                <Line key={`beta${i + 1}`} type="monotone" dataKey={`beta${i + 1}`} name={`Beta ${i + 1}`} stroke={BETA_COLORS[i] ?? '#94a3b8'} strokeWidth={1.5} dot={false} isAnimationActive={false} legendType="none" />
               ))}
 
-              {/* ── Suma betas: BLANCA GRUESA SÓLIDA (negro del Excel) ── */}
-              <Line
-                type="monotone"
-                dataKey="sumaGauss"
-                name="Beta suma"
-                stroke={FDP_SUMA_COLOR}
-                strokeWidth={3}
-                strokeDasharray=""
-                dot={false}
-                isAnimationActive={false}
-                legendType="none"
-              />
+              <Line type="monotone" dataKey="sumaGauss" name="Beta suma" stroke={FDP_SUMA_COLOR} strokeWidth={3} strokeDasharray="" dot={false} isAnimationActive={false} legendType="none" />
 
-              {/* Líneas verticales en cada moda */}
               {(hStats.betas ?? []).map((b, i) => (
-                <ReferenceLine
-                  key={`ref${i}`}
-                  x={b.mode}
-                  stroke={`${BETA_COLORS[i] ?? '#64748b'}80`}
-                  strokeDasharray="4 2"
-                  label={{
-                    value: `moda${i + 1}=${b.mode?.toFixed(1)}%`,
-                    fontSize: 9,
-                    fill: BETA_COLORS[i] ?? '#64748b',
-                    position: 'insideTopRight',
-                  }}
-                />
+                <ReferenceLine key={`ref${i}`} x={b.mode} stroke={`${BETA_COLORS[i] ?? '#64748b'}80`} strokeDasharray="4 2"
+                  label={{ value: `moda${i + 1}=${b.mode?.toFixed(1)}%`, fontSize: 9, fill: BETA_COLORS[i] ?? '#64748b', position: 'insideTopRight' }} />
               ))}
             </LineChart>
           </ResponsiveContainer>
 
-          {/* Métricas de ajuste */}
           <div style={{ display: 'flex', gap: 16, marginTop: 12, flexWrap: 'wrap' }}>
             <StatBox label="R²"      value={hStats.r2?.toFixed(4)  ?? '—'} color="#22c55e" />
             <StatBox label="EMC"     value={hStats.mse?.toExponential(2) ?? '—'} color={hStats.quality?.mse_ok ? '#22c55e' : '#ef4444'} />
@@ -751,13 +620,15 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
 
 // ══════════════════════════════════════════════════════════════
 // SECTION B.1 — Tabla resumen exportable por estación
+// CAMBIO 4: selector eliminado, valores fijos (T→2, HR→5)
 // ══════════════════════════════════════════════════════════════
 function SectionSummaryTable({ dateFrom, dateTo }) {
-  const [variable,    setVariable]    = useState('TEMP')
-  const [nComponents, setNComponents] = useState(2)
-  const [data,        setData]        = useState(null)
-  const [loading,     setLoading]     = useState(false)
-  const [error,       setError]       = useState(null)
+  const [variable, setVariable] = useState('TEMP')
+  const nComponentsT = 2
+  const nComponentsH = 5
+  const [data,    setData]    = useState(null)
+  const [loading, setLoading] = useState(false)
+  const [error,   setError]   = useState(null)
 
   const load = useCallback(async () => {
     setLoading(true); setError(null)
@@ -766,16 +637,17 @@ function SectionSummaryTable({ dateFrom, dateTo }) {
         variable_code: variable,
         date_from:     dateFrom,
         date_to:       dateTo,
-        n_components:  nComponents,
+        n_components:  variable === 'TEMP' ? nComponentsT : nComponentsH,
       })
       setData(r)
     } catch (e) { setError(e.message) }
     finally { setLoading(false) }
-  }, [variable, dateFrom, dateTo, nComponents])
+  }, [variable, dateFrom, dateTo])
 
   useEffect(() => { load() }, [load])
 
   const isHR = variable === 'HR'
+  const nComponents = variable === 'TEMP' ? nComponentsT : nComponentsH
 
   const compHeaders = Array.from({ length: nComponents }, (_, i) =>
     isHR
@@ -833,17 +705,8 @@ function SectionSummaryTable({ dateFrom, dateTo }) {
               }}>{v}</button>
             ))}
           </div>
-          <div>
-            <span style={{ fontSize: 13, color: '#94a3b8', fontWeight: 600, marginRight: 8 }}>Componentes:</span>
-            {[1, 2, 3, 4].map(n => (
-              <button key={n} onClick={() => setNComponents(n)} style={{
-                padding: '4px 12px', borderRadius: 20, border: '1px solid',
-                fontSize: 13, cursor: 'pointer', marginRight: 4,
-                background:   nComponents === n ? '#22c55e' : 'transparent',
-                borderColor:  nComponents === n ? '#22c55e' : '#334155',
-                color:        nComponents === n ? '#000'    : '#94a3b8',
-              }}>{n}</button>
-            ))}
+          <div style={{ fontSize: 12, color: '#64748b' }}>
+            Componentes: <strong style={{ color: '#f1f5f9' }}>{variable === 'TEMP' ? '2 Gaussianas' : '5 Beta'}</strong>
           </div>
           <button onClick={exportCSV} style={{
             padding: '6px 16px', borderRadius: 8, border: '1px solid #334155',
