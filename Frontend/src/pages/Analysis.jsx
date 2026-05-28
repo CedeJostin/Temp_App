@@ -39,6 +39,29 @@ const COMPLETITUD_COLORS = {
   red:    { bg: '#ef444420', border: '#ef444440', text: '#ef4444', label: '< 85%' },
 }
 
+// ── Paleta FDP igual al Excel ─────────────────────────────────
+// Frec norm  → rojo
+// Suma       → blanco suave (visible en fondo oscuro, equivale al negro del Excel)
+// Gaussianas individuales (T)
+const GAUSS_COLORS = [
+  '#f97316', // naranja  – Gauss1
+  '#22c55e', // verde    – Gauss2
+  '#a78bfa', // violeta  – Gauss3
+  '#facc15', // amarillo – Gauss4
+]
+// Betas individuales (HR): gris, amarillo, celeste, verde, morado (igual al Excel)
+const BETA_COLORS = [
+  '#94a3b8', // gris     – Beta1
+  '#eab308', // amarillo – Beta2
+  '#38bdf8', // celeste  – Beta3
+  '#4ade80', // verde    – Beta4
+  '#c084fc', // morado   – Beta5
+]
+// Color de la línea suma (negro del Excel → blanco suave en dark mode)
+const FDP_SUMA_COLOR  = '#e2e8f0'
+// Color de Frec norm (rojo en ambas gráficas, igual al Excel)
+const FDP_FREC_COLOR  = '#ef4444'
+
 // ── UI helpers ────────────────────────────────────────────────
 const Card = ({ children, style = {} }) => (
   <div style={{
@@ -84,7 +107,6 @@ const SectionCard = ({ title, subtitle, children, badge }) => (
   </Card>
 )
 
-// Indicador de completitud con color según rango del instructivo
 const CompletitudBadge = ({ pct, color }) => {
   const c = COMPLETITUD_COLORS[color] || COMPLETITUD_COLORS.red
   return (
@@ -98,7 +120,6 @@ const CompletitudBadge = ({ pct, color }) => {
   )
 }
 
-// Indicador de calidad del ajuste — incluye error_range_ok
 const QualityBadge = ({ quality }) => {
   if (!quality) return null
   const items = [
@@ -284,35 +305,19 @@ function SectionOverview({ stationId, dateFrom, dateTo }) {
 }
 
 // ══════════════════════════════════════════════════════════════
-// SECTION B — FDP (versión corregida)
-// Muestra: Fracción · Gauss1 · Gauss2 · ... · SumaGauss
-// igual que el gráfico del Excel de referencia.
+// SECTION B — FDP
+// Colores corregidos para coincidir con el Excel de referencia:
+//   Frec norm  → rojo  (#ef4444)
+//   Gauss/Beta suma → blanco suave grueso y sólido (equivale al negro del Excel)
+//   Componentes individuales → paletas GAUSS_COLORS / BETA_COLORS
 // ══════════════════════════════════════════════════════════════
 
-// ── Paleta de colores para gaussianas individuales ────────────────
-// Índice 0 → naranja (Gauss1), 1 → verde (Gauss2), …  igual al Excel
-const GAUSS_COLORS = [
-  '#f97316', // naranja  – Gauss1
-  '#22c55e', // verde    – Gauss2
-  '#a78bfa', // violeta  – Gauss3
-  '#facc15', // amarillo – Gauss4
-]
-
-const BETA_COLORS = [
-  '#f97316',
-  '#22c55e',
-  '#a78bfa',
-  '#facc15',
-]
-
-// ── Densidad gaussiana puntual ────────────────────────────────────
 function gaussPoint(x, mu, sigma, w, paso) {
   const exponent = -0.5 * ((x - mu) / sigma) ** 2
   const pdf = Math.exp(exponent) / (sigma * Math.sqrt(2 * Math.PI))
   return w * pdf * paso
 }
 
-// ── Densidad beta puntual ─────────────────────────────────────────
 function logGamma(z) {
   if (z < 0.5) return Math.log(Math.PI / Math.sin(Math.PI * z)) - logGamma(1 - z)
   z -= 1
@@ -334,17 +339,11 @@ function betaPDF(x01, alpha, beta) {
   return Math.exp((alpha - 1) * Math.log(x01) + (beta - 1) * Math.log(1 - x01) - logB)
 }
 
-// ── Enriquecer FDP con columnas por componente ────────────────────
-// paso viene de fdp_resolution que devuelve el backend (más preciso que recalcular).
-// sumaGauss usa point.model del backend para coincidir exactamente con el optimizador.
-// Las gaussianas individuales sí se calculan en el frontend con ese mismo paso.
 function enrichFDPGaussian(fdp, gaussians, paso = 0.1) {
   if (!fdp?.length || !gaussians?.length) return fdp ?? []
   return fdp.map(point => {
     const enriched = { ...point }
-    // SumaGauss = model del backend (parámetros no redondeados → más preciso)
     enriched.sumaGauss = point.model != null ? parseFloat(point.model.toFixed(7)) : 0
-    // Gaussianas individuales calculadas con el paso real del backend
     gaussians.forEach((g, i) => {
       enriched[`gauss${i + 1}`] = parseFloat(gaussPoint(point.x, g.mu, g.sigma, g.w, paso).toFixed(7))
     })
@@ -357,9 +356,7 @@ function enrichFDPBeta(fdp, betas, paso01 = 0.01) {
   return fdp.map(point => {
     const x01 = point.x / 100
     const enriched = { ...point }
-    // SumaGauss (aquí SumaBeta) = model del backend
     enriched.sumaGauss = point.model != null ? parseFloat(point.model.toFixed(7)) : 0
-    // Betas individuales calculadas con el paso real
     betas.forEach((b, i) => {
       const val = b.w * betaPDF(x01, b.alpha, b.beta) * paso01
       enriched[`beta${i + 1}`] = parseFloat(val.toFixed(7))
@@ -371,8 +368,13 @@ function enrichFDPBeta(fdp, betas, paso01 = 0.01) {
 const GaussianCards = ({ gaussians, unit }) => (
   <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 14 }}>
     {gaussians.map((g, i) => (
-      <div key={i} style={{ background: '#0f172a', borderRadius: 8, padding: '8px 12px' }}>
-        <div style={{ fontSize: 11, color: '#64748b', marginBottom: 4 }}>Gaussiana {i + 1}</div>
+      <div key={i} style={{
+        background: '#0f172a', borderRadius: 8, padding: '8px 12px',
+        borderLeft: `3px solid ${GAUSS_COLORS[i] ?? '#94a3b8'}`,
+      }}>
+        <div style={{ fontSize: 11, color: GAUSS_COLORS[i] ?? '#64748b', marginBottom: 4, fontWeight: 700 }}>
+          Gaussiana {i + 1}
+        </div>
         <div style={{ fontSize: 12, color: '#f1f5f9' }}>μ = <strong>{g.mu?.toFixed(2)}{unit}</strong></div>
         <div style={{ fontSize: 12, color: '#f1f5f9' }}>σ = <strong>{g.sigma?.toFixed(3)}</strong></div>
         <div style={{ fontSize: 12, color: '#f1f5f9' }}>w = <strong>{((g.w ?? 0) * 100).toFixed(1)}%</strong></div>
@@ -384,8 +386,13 @@ const GaussianCards = ({ gaussians, unit }) => (
 const BetaCards = ({ betas }) => (
   <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 14 }}>
     {betas.map((b, i) => (
-      <div key={i} style={{ background: '#0f172a', borderRadius: 8, padding: '8px 12px' }}>
-        <div style={{ fontSize: 11, color: '#64748b', marginBottom: 4 }}>Beta {i + 1}</div>
+      <div key={i} style={{
+        background: '#0f172a', borderRadius: 8, padding: '8px 12px',
+        borderLeft: `3px solid ${BETA_COLORS[i] ?? '#94a3b8'}`,
+      }}>
+        <div style={{ fontSize: 11, color: BETA_COLORS[i] ?? '#64748b', marginBottom: 4, fontWeight: 700 }}>
+          Beta {i + 1}
+        </div>
         <div style={{ fontSize: 12, color: '#f1f5f9' }}>α = <strong>{b.alpha?.toFixed(4)}</strong></div>
         <div style={{ fontSize: 12, color: '#f1f5f9' }}>β = <strong>{b.beta?.toFixed(4)}</strong></div>
         <div style={{ fontSize: 12, color: '#f1f5f9' }}>Moda = <strong>{b.mode?.toFixed(2)}%</strong></div>
@@ -429,14 +436,12 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
 
   if (error) return <Err msg={error} />
 
-  // ── Datos enriquecidos con columnas individuales por componente ──
-  // fdp_resolution viene del backend → paso exacto con el que se calculó la FDP
   const tPaso   = tStats?.fdp_resolution ?? 0.1
-  const hPaso01 = (hStats?.fdp_resolution ?? 1.0) / 100   // backend devuelve 1.0 (%) → convertir a [0,1]
+  const hPaso01 = (hStats?.fdp_resolution ?? 1.0) / 100
   const tFdp = tStats ? enrichFDPGaussian(tStats.fdp, tStats.gaussians ?? [], tPaso) : []
   const hFdp = hStats ? enrichFDPBeta(hStats.fdp, hStats.betas ?? [], hPaso01) : []
 
-  // ── Tooltip personalizado para mostrar todas las series ──────────
+  // Tooltip personalizado
   const CustomTooltip = ({ active, payload, label, unit }) => {
     if (!active || !payload?.length) return null
     return (
@@ -455,6 +460,34 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
       </div>
     )
   }
+
+  // Leyenda personalizada para mostrar colores correctos
+  const FDPLegend = ({ components, colors, sumaLabel, isGauss }) => (
+    <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 8, fontSize: 11, alignItems: 'center' }}>
+      {/* Frec norm */}
+      <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+        <svg width="24" height="4"><line x1="0" y1="2" x2="24" y2="2" stroke={FDP_FREC_COLOR} strokeWidth="2"/></svg>
+        <span style={{ color: '#94a3b8' }}>Frec norm</span>
+      </span>
+      {/* Componentes individuales */}
+      {components.map((c, i) => (
+        <span key={i} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+          <svg width="24" height="4"><line x1="0" y1="2" x2="24" y2="2" stroke={colors[i] ?? '#94a3b8'} strokeWidth="1.5"/></svg>
+          <span style={{ color: '#94a3b8' }}>
+            {isGauss
+              ? `Gauss ${i+1} (μ=${c.mu?.toFixed(1)}°C)`
+              : `Beta ${i+1} (moda=${c.mode?.toFixed(1)}%)`
+            }
+          </span>
+        </span>
+      ))}
+      {/* Suma */}
+      <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+        <svg width="24" height="5"><line x1="0" y1="2.5" x2="24" y2="2.5" stroke={FDP_SUMA_COLOR} strokeWidth="3"/></svg>
+        <span style={{ color: '#94a3b8' }}>{sumaLabel}</span>
+      </span>
+    </div>
+  )
 
   return (
     <>
@@ -493,7 +526,6 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
         >
           <GaussianCards gaussians={tStats.gaussians ?? []} unit="°C" />
 
-          {/* Nota sobre resolución */}
           <div style={{
             marginBottom: 12, padding: '6px 12px',
             background: '#0f172a', borderRadius: 6,
@@ -503,9 +535,16 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
             · modelo(x) = Σ w_i · N(x|μ_i,σ_i) · {tPaso}
           </div>
 
+          <FDPLegend
+            components={tStats.gaussians ?? []}
+            colors={GAUSS_COLORS}
+            sumaLabel="Gauss suma"
+            isGauss={true}
+          />
+
           <ResponsiveContainer width="100%" height={340}>
             <LineChart data={tFdp} margin={{ top: 8, right: 16, left: -10, bottom: 0 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+              <CartesianGrid strokeDasharray="3 3" stroke="#334155" strokeOpacity={0.5} />
               <XAxis
                 dataKey="x"
                 tick={{ fontSize: 10, fill: '#94a3b8' }}
@@ -514,7 +553,6 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
                 domain={['dataMin', 'dataMax']}
                 tickFormatter={v => v?.toFixed(1)}
                 ticks={(() => {
-                  // Ticks cada 1°C para que el eje refleje la resolución 0.1°C/bin
                   if (!tFdp.length) return []
                   const mn = Math.ceil(tFdp[0].x)
                   const mx = Math.floor(tFdp[tFdp.length - 1].x)
@@ -525,43 +563,46 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
               />
               <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} tickFormatter={v => v.toExponential(1)} />
               <Tooltip content={<CustomTooltip unit="°C" />} />
-              <Legend />
+              {/* SIN Legend de recharts — usamos FDPLegend propio arriba */}
 
-              {/* Fracción real — azul oscuro como el Excel */}
+              {/* ── Frec norm: ROJA (igual al Excel) ── */}
               <Line
                 type="monotone"
                 dataKey="freq"
-                name="Fraccion"
-                stroke="#1e40af"
+                name="Frec norm"
+                stroke={FDP_FREC_COLOR}
                 strokeWidth={2}
                 dot={false}
                 isAnimationActive={false}
+                legendType="none"
               />
 
-              {/* Gaussianas individuales */}
+              {/* ── Gaussianas individuales ── */}
               {(tStats.gaussians ?? []).map((g, i) => (
                 <Line
                   key={`gauss${i + 1}`}
                   type="monotone"
                   dataKey={`gauss${i + 1}`}
-                  name={`Gauss${i + 1} (μ=${g.mu?.toFixed(1)}°C, w=${((g.w ?? 0) * 100).toFixed(0)}%)`}
+                  name={`Gauss ${i + 1}`}
                   stroke={GAUSS_COLORS[i] ?? '#94a3b8'}
-                  strokeWidth={2}
+                  strokeWidth={1.5}
                   dot={false}
                   isAnimationActive={false}
+                  legendType="none"
                 />
               ))}
 
-              {/* Suma de gaussianas — cian como el Excel */}
+              {/* ── Suma gaussianas: BLANCA GRUESA SÓLIDA (negro del Excel) ── */}
               <Line
                 type="monotone"
                 dataKey="sumaGauss"
-                name="SumaGauss"
-                stroke="#06b6d4"
-                strokeWidth={2.5}
-                strokeDasharray="6 3"
+                name="Gauss suma"
+                stroke={FDP_SUMA_COLOR}
+                strokeWidth={3}
+                strokeDasharray=""
                 dot={false}
                 isAnimationActive={false}
+                legendType="none"
               />
 
               {/* Líneas verticales en cada μ */}
@@ -582,12 +623,12 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
             </LineChart>
           </ResponsiveContainer>
 
-          {/* Tabla de métricas de ajuste */}
+          {/* Métricas de ajuste */}
           <div style={{ display: 'flex', gap: 16, marginTop: 12, flexWrap: 'wrap' }}>
-            <StatBox label="R²"  value={tStats.r2?.toFixed(4)  ?? '—'} color="#22c55e" />
-            <StatBox label="EMC" value={tStats.mse?.toExponential(2) ?? '—'} color={tStats.quality?.mse_ok ? '#22c55e' : '#ef4444'} />
+            <StatBox label="R²"      value={tStats.r2?.toFixed(4)  ?? '—'} color="#22c55e" />
+            <StatBox label="EMC"     value={tStats.mse?.toExponential(2) ?? '—'} color={tStats.quality?.mse_ok ? '#22c55e' : '#ef4444'} />
             <StatBox label="Err máx" value={tStats.quality?.max_error_range?.toFixed(5) ?? '—'} color={tStats.quality?.error_range_ok ? '#22c55e' : '#ef4444'} />
-            <StatBox label="Σw" value={tStats.quality?.weights_sum?.toFixed(4) ?? '—'} color={tStats.quality?.weights_sum_ok ? '#22c55e' : '#ef4444'} />
+            <StatBox label="Σw"      value={tStats.quality?.weights_sum?.toFixed(4) ?? '—'} color={tStats.quality?.weights_sum_ok ? '#22c55e' : '#ef4444'} />
           </div>
         </SectionCard>
       )}
@@ -615,57 +656,66 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
             · modelo(x) = Σ w_i · Beta(x/100|α_i,β_i) · 0.01
           </div>
 
+          <FDPLegend
+            components={hStats.betas ?? []}
+            colors={BETA_COLORS}
+            sumaLabel="Beta suma"
+            isGauss={false}
+          />
+
           <ResponsiveContainer width="100%" height={340}>
             <LineChart data={hFdp} margin={{ top: 8, right: 16, left: -10, bottom: 0 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+              <CartesianGrid strokeDasharray="3 3" stroke="#334155" strokeOpacity={0.5} />
               <XAxis
                 dataKey="x"
                 tick={{ fontSize: 10, fill: '#94a3b8' }}
                 unit="%"
                 type="number"
-                domain={['dataMin', 'dataMax']}
+                domain={[0, 100]}
                 tickFormatter={v => v?.toFixed(0)}
-                ticks={[0,5,10,15,20,25,30,35,40,45,50,55,60,65,70,75,80,85,90,95,100]}
+                ticks={[0,10,20,30,40,50,60,70,80,90,100]}
               />
               <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} tickFormatter={v => v.toExponential(1)} />
               <Tooltip content={<CustomTooltip unit="%" />} />
-              <Legend />
 
-              {/* Fracción real — azul oscuro */}
+              {/* ── Frec norm: ROJA ── */}
               <Line
                 type="monotone"
                 dataKey="freq"
-                name="Fraccion"
-                stroke="#1e40af"
+                name="Frec norm"
+                stroke={FDP_FREC_COLOR}
                 strokeWidth={2}
                 dot={false}
                 isAnimationActive={false}
+                legendType="none"
               />
 
-              {/* Betas individuales */}
+              {/* ── Betas individuales ── */}
               {(hStats.betas ?? []).map((b, i) => (
                 <Line
                   key={`beta${i + 1}`}
                   type="monotone"
                   dataKey={`beta${i + 1}`}
-                  name={`Beta${i + 1} (moda=${b.mode?.toFixed(1)}%, w=${((b.w ?? 0) * 100).toFixed(0)}%)`}
+                  name={`Beta ${i + 1}`}
                   stroke={BETA_COLORS[i] ?? '#94a3b8'}
-                  strokeWidth={2}
+                  strokeWidth={1.5}
                   dot={false}
                   isAnimationActive={false}
+                  legendType="none"
                 />
               ))}
 
-              {/* Suma de betas — cian */}
+              {/* ── Suma betas: BLANCA GRUESA SÓLIDA (negro del Excel) ── */}
               <Line
                 type="monotone"
                 dataKey="sumaGauss"
-                name="SumaBeta"
-                stroke="#06b6d4"
-                strokeWidth={2.5}
-                strokeDasharray="6 3"
+                name="Beta suma"
+                stroke={FDP_SUMA_COLOR}
+                strokeWidth={3}
+                strokeDasharray=""
                 dot={false}
                 isAnimationActive={false}
+                legendType="none"
               />
 
               {/* Líneas verticales en cada moda */}
@@ -686,12 +736,12 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
             </LineChart>
           </ResponsiveContainer>
 
-          {/* Tabla de métricas de ajuste */}
+          {/* Métricas de ajuste */}
           <div style={{ display: 'flex', gap: 16, marginTop: 12, flexWrap: 'wrap' }}>
-            <StatBox label="R²"  value={hStats.r2?.toFixed(4)  ?? '—'} color="#22c55e" />
-            <StatBox label="EMC" value={hStats.mse?.toExponential(2) ?? '—'} color={hStats.quality?.mse_ok ? '#22c55e' : '#ef4444'} />
+            <StatBox label="R²"      value={hStats.r2?.toFixed(4)  ?? '—'} color="#22c55e" />
+            <StatBox label="EMC"     value={hStats.mse?.toExponential(2) ?? '—'} color={hStats.quality?.mse_ok ? '#22c55e' : '#ef4444'} />
             <StatBox label="Err máx" value={hStats.quality?.max_error_range?.toFixed(5) ?? '—'} color={hStats.quality?.error_range_ok ? '#22c55e' : '#ef4444'} />
-            <StatBox label="Σw" value={hStats.quality?.weights_sum?.toFixed(4) ?? '—'} color={hStats.quality?.weights_sum_ok ? '#22c55e' : '#ef4444'} />
+            <StatBox label="Σw"      value={hStats.quality?.weights_sum?.toFixed(4) ?? '—'} color={hStats.quality?.weights_sum_ok ? '#22c55e' : '#ef4444'} />
           </div>
         </SectionCard>
       )}
@@ -1103,7 +1153,6 @@ function SectionDailyProfile({ stationId, dateFrom, dateTo }) {
       <div style={{ marginBottom: 8, padding: '4px 0' }}>
         <p style={{ margin: 0, fontSize: 13, color: '#94a3b8' }}>
           Perfil diario promedio (c.2): estadísticos horarios de T (max, min, avg, moda, Q25, Q75) y HR (moda, avg).
-          Los máximos permiten ver si ocurren en momentos específicos del día.
         </p>
       </div>
       <MonthSelector />
@@ -1126,12 +1175,12 @@ function SectionDailyProfile({ stationId, dateFrom, dateTo }) {
                 contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }}
               />
               <Legend />
-              <Area type="monotone" dataKey="max"  name="Máx"     stroke="#ef4444" fill="none"     strokeWidth={1} opacity={0.5} dot={false} />
-              <Area type="monotone" dataKey="q75"  name="Q75"     stroke="#f97316" fill="none"     strokeWidth={1} strokeDasharray="4 2" dot={false} />
+              <Area type="monotone" dataKey="max"  name="Máx"      stroke="#ef4444" fill="none"      strokeWidth={1} opacity={0.5} dot={false} />
+              <Area type="monotone" dataKey="q75"  name="Q75"      stroke="#f97316" fill="none"      strokeWidth={1} strokeDasharray="4 2" dot={false} />
               <Area type="monotone" dataKey="avg"  name="Promedio" stroke="#ef4444" fill="url(#tpg)" strokeWidth={2} dot={false} />
-              <Area type="monotone" dataKey="mode" name="Moda"    stroke="#fbbf24" fill="none"     strokeWidth={1} strokeDasharray="6 2" dot={false} />
-              <Area type="monotone" dataKey="q25"  name="Q25"     stroke="#f97316" fill="none"     strokeWidth={1} strokeDasharray="4 2" dot={false} />
-              <Area type="monotone" dataKey="min"  name="Mín"     stroke="#ef4444" fill="none"     strokeWidth={1} opacity={0.5} dot={false} />
+              <Area type="monotone" dataKey="mode" name="Moda"     stroke="#fbbf24" fill="none"      strokeWidth={1} strokeDasharray="6 2" dot={false} />
+              <Area type="monotone" dataKey="q25"  name="Q25"      stroke="#f97316" fill="none"      strokeWidth={1} strokeDasharray="4 2" dot={false} />
+              <Area type="monotone" dataKey="min"  name="Mín"      stroke="#ef4444" fill="none"      strokeWidth={1} opacity={0.5} dot={false} />
             </AreaChart>
           </ResponsiveContainer>
         </SectionCard>
@@ -1155,12 +1204,12 @@ function SectionDailyProfile({ stationId, dateFrom, dateTo }) {
                 contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }}
               />
               <Legend />
-              <Area type="monotone" dataKey="max"  name="Máx"    stroke="#3b82f6" fill="none"     strokeWidth={1} opacity={0.5} dot={false} />
-              <Area type="monotone" dataKey="q75"  name="Q75"    stroke="#6366f1" fill="none"     strokeWidth={1} strokeDasharray="4 2" dot={false} />
+              <Area type="monotone" dataKey="max"  name="Máx"      stroke="#3b82f6" fill="none"      strokeWidth={1} opacity={0.5} dot={false} />
+              <Area type="monotone" dataKey="q75"  name="Q75"      stroke="#6366f1" fill="none"      strokeWidth={1} strokeDasharray="4 2" dot={false} />
               <Area type="monotone" dataKey="avg"  name="Promedio" stroke="#3b82f6" fill="url(#hpg)" strokeWidth={2} dot={false} />
-              <Area type="monotone" dataKey="mode" name="Moda"   stroke="#a78bfa" fill="none"     strokeWidth={2} strokeDasharray="6 2" dot={false} />
-              <Area type="monotone" dataKey="q25"  name="Q25"    stroke="#6366f1" fill="none"     strokeWidth={1} strokeDasharray="4 2" dot={false} />
-              <Area type="monotone" dataKey="min"  name="Mín"    stroke="#3b82f6" fill="none"     strokeWidth={1} opacity={0.5} dot={false} />
+              <Area type="monotone" dataKey="mode" name="Moda"     stroke="#a78bfa" fill="none"      strokeWidth={2} strokeDasharray="6 2" dot={false} />
+              <Area type="monotone" dataKey="q25"  name="Q25"      stroke="#6366f1" fill="none"      strokeWidth={1} strokeDasharray="4 2" dot={false} />
+              <Area type="monotone" dataKey="min"  name="Mín"      stroke="#3b82f6" fill="none"      strokeWidth={1} opacity={0.5} dot={false} />
             </AreaChart>
           </ResponsiveContainer>
         </SectionCard>
@@ -1207,7 +1256,6 @@ function SectionAnnualProfile({ stationId, dateFrom, dateTo }) {
       <div style={{ marginBottom: 8 }}>
         <p style={{ margin: 0, fontSize: 13, color: '#94a3b8' }}>
           Perfil anual promedio (c.3): media diaria de T y moda diaria de HR promediadas por día del año.
-          Muestra si los máximos ocurren en momentos específicos del año.
         </p>
       </div>
 
@@ -1229,11 +1277,11 @@ function SectionAnnualProfile({ stationId, dateFrom, dateTo }) {
               <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} unit="°C" />
               <Tooltip labelFormatter={fmtDoy} contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }} />
               <Legend />
-              <Area type="monotone" dataKey="max" name="Máx"   stroke="#ef4444" fill="none"     strokeWidth={1} opacity={0.4} dot={false} />
-              <Area type="monotone" dataKey="q75" name="Q75"   stroke="#f97316" fill="none"     strokeWidth={1} strokeDasharray="4 2" dot={false} />
+              <Area type="monotone" dataKey="max" name="Máx"   stroke="#ef4444" fill="none"      strokeWidth={1} opacity={0.4} dot={false} />
+              <Area type="monotone" dataKey="q75" name="Q75"   stroke="#f97316" fill="none"      strokeWidth={1} strokeDasharray="4 2" dot={false} />
               <Area type="monotone" dataKey="avg" name="Media" stroke="#ef4444" fill="url(#tag)" strokeWidth={2} dot={false} />
-              <Area type="monotone" dataKey="q25" name="Q25"   stroke="#f97316" fill="none"     strokeWidth={1} strokeDasharray="4 2" dot={false} />
-              <Area type="monotone" dataKey="min" name="Mín"   stroke="#ef4444" fill="none"     strokeWidth={1} opacity={0.4} dot={false} />
+              <Area type="monotone" dataKey="q25" name="Q25"   stroke="#f97316" fill="none"      strokeWidth={1} strokeDasharray="4 2" dot={false} />
+              <Area type="monotone" dataKey="min" name="Mín"   stroke="#ef4444" fill="none"      strokeWidth={1} opacity={0.4} dot={false} />
               {monthDoys.map((d, i) => (
                 <ReferenceLine key={i} x={d} stroke="#334155" strokeDasharray="2 4"
                   label={{ value: MONTHS[i], fontSize: 9, fill: '#64748b', position: 'insideTopRight' }} />
@@ -1261,11 +1309,11 @@ function SectionAnnualProfile({ stationId, dateFrom, dateTo }) {
               <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} unit="%" domain={[0, 100]} />
               <Tooltip labelFormatter={fmtDoy} contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }} />
               <Legend />
-              <Area type="monotone" dataKey="max" name="Máx"  stroke="#3b82f6" fill="none"     strokeWidth={1} opacity={0.4} dot={false} />
-              <Area type="monotone" dataKey="q75" name="Q75"  stroke="#6366f1" fill="none"     strokeWidth={1} strokeDasharray="4 2" dot={false} />
+              <Area type="monotone" dataKey="max" name="Máx"  stroke="#3b82f6" fill="none"      strokeWidth={1} opacity={0.4} dot={false} />
+              <Area type="monotone" dataKey="q75" name="Q75"  stroke="#6366f1" fill="none"      strokeWidth={1} strokeDasharray="4 2" dot={false} />
               <Area type="monotone" dataKey="avg" name="Moda" stroke="#3b82f6" fill="url(#hag)" strokeWidth={2} dot={false} />
-              <Area type="monotone" dataKey="q25" name="Q25"  stroke="#6366f1" fill="none"     strokeWidth={1} strokeDasharray="4 2" dot={false} />
-              <Area type="monotone" dataKey="min" name="Mín"  stroke="#3b82f6" fill="none"     strokeWidth={1} opacity={0.4} dot={false} />
+              <Area type="monotone" dataKey="q25" name="Q25"  stroke="#6366f1" fill="none"      strokeWidth={1} strokeDasharray="4 2" dot={false} />
+              <Area type="monotone" dataKey="min" name="Mín"  stroke="#3b82f6" fill="none"      strokeWidth={1} opacity={0.4} dot={false} />
               {monthDoys.map((d, i) => (
                 <ReferenceLine key={i} x={d} stroke="#334155" strokeDasharray="2 4"
                   label={{ value: MONTHS[i], fontSize: 9, fill: '#64748b', position: 'insideTopRight' }} />
@@ -1424,7 +1472,7 @@ function SectionCombined({ stationId, stationAlt, dateFrom, dateTo }) {
       {mobilityT.length > 0 && (
         <SectionCard
           title="d.4) Movilidad del flujo T × HR durante el año"
-          subtitle="Temperatura y HR promedio por mes y hora del día — muestra cuándo ocurren los máximos"
+          subtitle="Temperatura y HR promedio por mes y hora del día"
         >
           {(() => {
             const matT  = Array.from({ length: 12 }, () => Array(24).fill(null))
