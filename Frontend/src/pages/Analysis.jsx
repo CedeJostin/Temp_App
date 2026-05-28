@@ -300,6 +300,7 @@ function SectionOverview({ stationId, dateFrom, dateTo }) {
 
 // ══════════════════════════════════════════════════════════════
 // SECTION B — FDP
+// Funciones matemáticas para evaluar PDFs en el frontend
 // ══════════════════════════════════════════════════════════════
 
 function gaussPoint(x, mu, sigma, w, paso) {
@@ -308,6 +309,7 @@ function gaussPoint(x, mu, sigma, w, paso) {
   return w * pdf * paso
 }
 
+// ── Log-Gamma y Beta generalizada para el frontend ────────────
 function logGamma(z) {
   if (z < 0.5) return Math.log(Math.PI / Math.sin(Math.PI * z)) - logGamma(1 - z)
   z -= 1
@@ -323,32 +325,73 @@ function logGamma(z) {
   return 0.5 * Math.log(2 * Math.PI) + (z + 0.5) * Math.log(t) - t + Math.log(x)
 }
 
-function betaPDF(x01, alpha, beta) {
+/**
+ * PDF de la distribución Beta estándar en [0,1].
+ * Maneja correctamente los casos extremos donde a < 1 o b < 1
+ * (distribuciones en U con spike en los bordes).
+ */
+function betaStdPDF(x01, alpha, beta) {
   if (x01 <= 0 || x01 >= 1) return 0
+  // log(pdf) = (a-1)*log(x) + (b-1)*log(1-x) - logB(a,b)
   const logB = logGamma(alpha) + logGamma(beta) - logGamma(alpha + beta)
-  return Math.exp((alpha - 1) * Math.log(x01) + (beta - 1) * Math.log(1 - x01) - logB)
+  const logPdf = (alpha - 1) * Math.log(x01) + (beta - 1) * Math.log(1 - x01) - logB
+  return Math.exp(logPdf)
 }
 
+/**
+ * PDF de la distribución Beta GENERALIZADA con soporte [A, B].
+ * f(x; a, b, A, B) = betaStdPDF((x-A)/(B-A), a, b) / (B-A)
+ *
+ * Esta es la misma función que usa el backend Python en _fit_beta_components.
+ * El paso (1% en escala 0-100) convierte la densidad a fracción.
+ */
+function betaGenPDF(xPct, alpha, beta_param, A, B, w, paso) {
+  const width = B - A
+  if (width <= 0) return 0
+  const x01 = (xPct - A) / width
+  if (x01 <= 0 || x01 >= 1) return 0
+  const pdf = betaStdPDF(x01, alpha, beta_param) / width
+  return w * pdf * paso
+}
+
+/**
+ * Enriquece la FDP de T con curvas gaussianas individuales y su suma.
+ * paso: resolución en °C (0.1 por defecto)
+ */
 function enrichFDPGaussian(fdp, gaussians, paso = 0.1) {
   if (!fdp?.length || !gaussians?.length) return fdp ?? []
   return fdp.map(point => {
     const enriched = { ...point }
+    // La suma del modelo ya viene del backend (campo "model")
     enriched.sumaGauss = point.model != null ? parseFloat(point.model.toFixed(7)) : 0
     gaussians.forEach((g, i) => {
-      enriched[`gauss${i + 1}`] = parseFloat(gaussPoint(point.x, g.mu, g.sigma, g.w, paso).toFixed(7))
+      enriched[`gauss${i + 1}`] = parseFloat(
+        gaussPoint(point.x, g.mu, g.sigma, g.w, paso).toFixed(7)
+      )
     })
     return enriched
   })
 }
 
-function enrichFDPBeta(fdp, betas, paso01 = 0.01) {
+/**
+ * Enriquece la FDP de HR con curvas Beta generalizadas individuales y su suma.
+ *
+ * CORRECCIÓN CRÍTICA respecto a la versión anterior:
+ * - Usa betaGenPDF con soporte [A, B] por componente (igual que el backend)
+ * - El paso es 1.0 (en escala 0-100), NO 0.01
+ * - La suma (sumaGauss) viene del campo "model" del backend
+ */
+function enrichFDPBeta(fdp, betas) {
   if (!fdp?.length || !betas?.length) return fdp ?? []
+  const paso = 1.0  // resolución 1% en escala [0, 100]
   return fdp.map(point => {
-    const x01 = point.x / 100
     const enriched = { ...point }
+    // Suma del modelo desde el backend (más precisa que recalcular)
     enriched.sumaGauss = point.model != null ? parseFloat(point.model.toFixed(7)) : 0
     betas.forEach((b, i) => {
-      const val = b.w * betaPDF(x01, b.alpha, b.beta) * paso01
+      const A = b.A ?? 0
+      const B = b.B ?? 100
+      const val = betaGenPDF(point.x, b.alpha, b.beta, A, B, b.w, paso)
       enriched[`beta${i + 1}`] = parseFloat(val.toFixed(7))
     })
     return enriched
@@ -385,15 +428,16 @@ const BetaCards = ({ betas }) => (
         </div>
         <div style={{ fontSize: 12, color: '#f1f5f9' }}>α = <strong>{b.alpha?.toFixed(4)}</strong></div>
         <div style={{ fontSize: 12, color: '#f1f5f9' }}>β = <strong>{b.beta?.toFixed(4)}</strong></div>
+        <div style={{ fontSize: 12, color: '#f1f5f9' }}>
+          Soporte = <strong>[{b.A?.toFixed(0)}, {b.B?.toFixed(0)}]</strong>
+        </div>
         <div style={{ fontSize: 12, color: '#f1f5f9' }}>Moda = <strong>{b.mode?.toFixed(2)}%</strong></div>
-        <div style={{ fontSize: 12, color: '#f1f5f9' }}>Var = <strong>{b.variance?.toFixed(4)}</strong></div>
         <div style={{ fontSize: 12, color: '#f1f5f9' }}>w = <strong>{((b.w ?? 0) * 100).toFixed(1)}%</strong></div>
       </div>
     ))}
   </div>
 )
 
-// CAMBIO 1 + 2: selector eliminado, valores fijos (T→2, HR→5)
 function SectionFDP({ stationId, dateFrom, dateTo }) {
   const [tStats,  setTStats]  = useState(null)
   const [hStats,  setHStats]  = useState(null)
@@ -426,10 +470,12 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
 
   if (error) return <Err msg={error} />
 
-  const tPaso   = tStats?.fdp_resolution ?? 0.1
-  const hPaso01 = (hStats?.fdp_resolution ?? 1.0) / 100
+  const tPaso = tStats?.fdp_resolution ?? 0.1
+
+  // Enriquecer FDP con curvas individuales
   const tFdp = tStats ? enrichFDPGaussian(tStats.fdp, tStats.gaussians ?? [], tPaso) : []
-  const hFdp = hStats ? enrichFDPBeta(hStats.fdp, hStats.betas ?? [], hPaso01) : []
+  // CORRECCIÓN: enrichFDPBeta ya no necesita paso_01, usa paso=1 internamente
+  const hFdp = hStats ? enrichFDPBeta(hStats.fdp, hStats.betas ?? []) : []
 
   const CustomTooltip = ({ active, payload, label, unit }) => {
     if (!active || !payload?.length) return null
@@ -439,7 +485,7 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
         borderRadius: 8, padding: '10px 14px', fontSize: 11,
       }}>
         <div style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 6 }}>
-          {label?.toFixed?.(1) ?? label}{unit}
+          {typeof label === 'number' ? label.toFixed(1) : label}{unit}
         </div>
         {payload.map((p, i) => (
           <div key={i} style={{ color: p.color, marginBottom: 2 }}>
@@ -528,7 +574,7 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
                 })()}
               />
               <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} tickFormatter={v => v.toExponential(1)} />
-              <Tooltip content={<CustomTooltip unit="°C" />} />
+              <Tooltip content={props => <CustomTooltip {...props} unit="°C" />} />
 
               <Line type="monotone" dataKey="freq" name="Frec norm" stroke={FDP_FREC_COLOR} strokeWidth={2} dot={false} isAnimationActive={false} legendType="none" />
 
@@ -536,7 +582,7 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
                 <Line key={`gauss${i + 1}`} type="monotone" dataKey={`gauss${i + 1}`} name={`Gauss ${i + 1}`} stroke={GAUSS_COLORS[i] ?? '#94a3b8'} strokeWidth={1.5} dot={false} isAnimationActive={false} legendType="none" />
               ))}
 
-              <Line type="monotone" dataKey="sumaGauss" name="Gauss suma" stroke={FDP_SUMA_COLOR} strokeWidth={3} strokeDasharray="" dot={false} isAnimationActive={false} legendType="none" />
+              <Line type="monotone" dataKey="sumaGauss" name="Gauss suma" stroke={FDP_SUMA_COLOR} strokeWidth={3} dot={false} isAnimationActive={false} legendType="none" />
 
               {(tStats.gaussians ?? []).map((g, i) => (
                 <ReferenceLine key={`ref${i}`} x={parseFloat(g.mu?.toFixed(1))} stroke={`${GAUSS_COLORS[i] ?? '#64748b'}80`} strokeDasharray="4 2"
@@ -557,7 +603,7 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
       {/* ── FDP Humedad Relativa ─────────────────────────────────── */}
       {!loading && hStats && (
         <SectionCard
-          title="FDP — Humedad Relativa (Beta)"
+          title="FDP — Humedad Relativa (Beta generalizada)"
           subtitle={
             `R² = ${hStats.r2?.toFixed(4) ?? '—'} · ` +
             `EMC = ${hStats.mse?.toExponential(2) ?? '—'} · ` +
@@ -574,7 +620,7 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
             fontSize: 11, color: '#64748b', fontFamily: 'monospace',
           }}>
             freq[bin] = count[bin] / N_total · paso = 1% (escala [0,100])
-            · modelo(x) = Σ w_i · Beta(x/100|α_i,β_i) · 0.01
+            · modelo(x) = Σ w_i · BetaGen(x|α_i,β_i,A_i,B_i) · 1
           </div>
 
           <FDPLegend
@@ -587,21 +633,71 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
           <ResponsiveContainer width="100%" height={340}>
             <LineChart data={hFdp} margin={{ top: 8, right: 16, left: -10, bottom: 0 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#334155" strokeOpacity={0.5} />
-              <XAxis dataKey="x" tick={{ fontSize: 10, fill: '#94a3b8' }} unit="%" type="number" domain={[0, 100]} tickFormatter={v => v?.toFixed(0)} ticks={[0,10,20,30,40,50,60,70,80,90,100]} />
+              <XAxis
+                dataKey="x"
+                tick={{ fontSize: 10, fill: '#94a3b8' }}
+                unit="%"
+                type="number"
+                domain={[0, 100]}
+                tickFormatter={v => v?.toFixed(0)}
+                ticks={[0,10,20,30,40,50,60,70,80,90,100]}
+              />
               <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} tickFormatter={v => v.toExponential(1)} />
-              <Tooltip content={<CustomTooltip unit="%" />} />
+              <Tooltip content={props => <CustomTooltip {...props} unit="%" />} />
 
-              <Line type="monotone" dataKey="freq" name="Frec norm" stroke={FDP_FREC_COLOR} strokeWidth={2} dot={false} isAnimationActive={false} legendType="none" />
+              {/* Frecuencia real (roja) */}
+              <Line
+                type="monotone"
+                dataKey="freq"
+                name="Frec norm"
+                stroke={FDP_FREC_COLOR}
+                strokeWidth={2}
+                dot={false}
+                isAnimationActive={false}
+                legendType="none"
+              />
 
+              {/* Curvas Beta individuales */}
               {(hStats.betas ?? []).map((b, i) => (
-                <Line key={`beta${i + 1}`} type="monotone" dataKey={`beta${i + 1}`} name={`Beta ${i + 1}`} stroke={BETA_COLORS[i] ?? '#94a3b8'} strokeWidth={1.5} dot={false} isAnimationActive={false} legendType="none" />
+                <Line
+                  key={`beta${i + 1}`}
+                  type="monotone"
+                  dataKey={`beta${i + 1}`}
+                  name={`Beta ${i + 1}`}
+                  stroke={BETA_COLORS[i] ?? '#94a3b8'}
+                  strokeWidth={1.5}
+                  dot={false}
+                  isAnimationActive={false}
+                  legendType="none"
+                />
               ))}
 
-              <Line type="monotone" dataKey="sumaGauss" name="Beta suma" stroke={FDP_SUMA_COLOR} strokeWidth={3} strokeDasharray="" dot={false} isAnimationActive={false} legendType="none" />
+              {/* Suma del modelo (blanca) - viene del backend */}
+              <Line
+                type="monotone"
+                dataKey="sumaGauss"
+                name="Beta suma"
+                stroke={FDP_SUMA_COLOR}
+                strokeWidth={3}
+                dot={false}
+                isAnimationActive={false}
+                legendType="none"
+              />
 
+              {/* Líneas de referencia en las modas */}
               {(hStats.betas ?? []).map((b, i) => (
-                <ReferenceLine key={`ref${i}`} x={b.mode} stroke={`${BETA_COLORS[i] ?? '#64748b'}80`} strokeDasharray="4 2"
-                  label={{ value: `moda${i + 1}=${b.mode?.toFixed(1)}%`, fontSize: 9, fill: BETA_COLORS[i] ?? '#64748b', position: 'insideTopRight' }} />
+                <ReferenceLine
+                  key={`ref${i}`}
+                  x={b.mode}
+                  stroke={`${BETA_COLORS[i] ?? '#64748b'}80`}
+                  strokeDasharray="4 2"
+                  label={{
+                    value: `m${i+1}=${b.mode?.toFixed(1)}%`,
+                    fontSize: 9,
+                    fill: BETA_COLORS[i] ?? '#64748b',
+                    position: 'insideTopRight',
+                  }}
+                />
               ))}
             </LineChart>
           </ResponsiveContainer>
@@ -620,7 +716,6 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
 
 // ══════════════════════════════════════════════════════════════
 // SECTION B.1 — Tabla resumen exportable por estación
-// CAMBIO 4: selector eliminado, valores fijos (T→2, HR→5)
 // ══════════════════════════════════════════════════════════════
 function SectionSummaryTable({ dateFrom, dateTo }) {
   const [variable, setVariable] = useState('TEMP')
@@ -651,7 +746,7 @@ function SectionSummaryTable({ dateFrom, dateTo }) {
 
   const compHeaders = Array.from({ length: nComponents }, (_, i) =>
     isHR
-      ? [`Moda${i+1}`, `Var${i+1}`, `w${i+1}`]
+      ? [`Moda${i+1}`, `w${i+1}`]
       : [`μ${i+1}`, `σ${i+1}`, `w${i+1}`]
   ).flat()
 
@@ -662,9 +757,9 @@ function SectionSummaryTable({ dateFrom, dateTo }) {
     const rows = data.stations.map(s => {
       const compVals = Array.from({ length: nComponents }, (_, i) => {
         const c = s.components?.[i]
-        if (!c) return isHR ? ['—', '—', '—'] : ['—', '—', '—']
+        if (!c) return isHR ? ['—', '—'] : ['—', '—', '—']
         return isHR
-          ? [c.mode ?? '—', c.variance ?? '—', ((c.w ?? 0) * 100).toFixed(1) + '%']
+          ? [c.mode ?? '—', ((c.w ?? 0) * 100).toFixed(1) + '%']
           : [c.mu ?? '—', c.sigma ?? '—', ((c.w ?? 0) * 100).toFixed(1) + '%']
       }).flat()
       return [
@@ -706,7 +801,7 @@ function SectionSummaryTable({ dateFrom, dateTo }) {
             ))}
           </div>
           <div style={{ fontSize: 12, color: '#64748b' }}>
-            Componentes: <strong style={{ color: '#f1f5f9' }}>{variable === 'TEMP' ? '2 Gaussianas' : '5 Beta'}</strong>
+            Componentes: <strong style={{ color: '#f1f5f9' }}>{variable === 'TEMP' ? '2 Gaussianas' : '5 Beta generalizadas'}</strong>
           </div>
           <button onClick={exportCSV} style={{
             padding: '6px 16px', borderRadius: 8, border: '1px solid #334155',
@@ -738,9 +833,9 @@ function SectionSummaryTable({ dateFrom, dateTo }) {
                 {data.stations.map((s, idx) => {
                   const compVals = Array.from({ length: nComponents }, (_, i) => {
                     const c = s.components?.[i]
-                    if (!c) return isHR ? ['—', '—', '—'] : ['—', '—', '—']
+                    if (!c) return isHR ? ['—', '—'] : ['—', '—', '—']
                     return isHR
-                      ? [c.mode?.toFixed(1) ?? '—', c.variance?.toFixed(4) ?? '—', ((c.w ?? 0)*100).toFixed(1)+'%']
+                      ? [c.mode?.toFixed(1) ?? '—', ((c.w ?? 0)*100).toFixed(1)+'%']
                       : [c.mu?.toFixed(2) ?? '—', c.sigma?.toFixed(3) ?? '—', ((c.w ?? 0)*100).toFixed(1)+'%']
                   }).flat()
                   const q = s.quality

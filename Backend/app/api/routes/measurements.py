@@ -110,19 +110,12 @@ def _completitud_color(pct: float) -> str:
 
 # ═════════════════════════════════════════════════════════════
 # HELPER INTERNO: construir FDP como fracción simple
-# (igual que la columna "Fracción" del Excel de referencia)
 # ═════════════════════════════════════════════════════════════
 
 def _build_fdp(values, paso: float) -> list[dict]:
     """
     Construye la FDP como fracción simple:
         freq[i] = count_en_bin[i] / total_datos
-
-    Esto es equivalente a la columna "Fracción" del Excel de Javier,
-    donde cada barra representa la proporción de datos en ese bin.
-
-    NO usa density=True de numpy (que devuelve densidad de probabilidad),
-    sino conteo directo dividido por el total.
     """
     import numpy as np
 
@@ -142,8 +135,6 @@ def _build_fdp(values, paso: float) -> list[dict]:
 
 # ═════════════════════════════════════════════════════════════
 # AJUSTE GAUSSIANO (para T)
-# Detección de picos por primera derivada (cambio de signo + → -)
-# según indicaciones del coordinador (método del instructivo).
 # ═════════════════════════════════════════════════════════════
 
 def _fit_gaussian_components(
@@ -153,24 +144,8 @@ def _fit_gaussian_components(
     """
     Ajusta n_components gaussianas a la FDP de T.
 
-    FDP esperada: fracción simple (freq = count/total), escala [0,1].
-
-    Detección de picos:
-      - Se calcula la primera derivada numérica: dy[i] = y[i+1] - y[i]
-      - Un pico real es donde dy cambia de positivo a negativo (subida → bajada)
-      - Esto evita depender de find_peaks y sus parámetros arbitrarios
-
-    Modelo: suma ponderada de gaussianas × paso (para que integre a fracción)
-      model(x) = Σ w_i · N(x | mu_i, sigma_i) · paso
-
-    Criterios del instructivo:
-      EMC ≤ 1E-5 · R² ≥ 0.95 · Error punto a punto ±1E-3 · Σw = 1
-
-    Retorna:
-      gaussians : lista de dicts {mu, sigma, w}
-      r2        : coeficiente de determinación
-      mse       : error medio cuadrático
-      fdp_out   : fdp con columnas "model" y "error_range" agregadas
+    Detección de picos por primera derivada (cambio de signo + → -).
+    Modelo: Σ w_i · N(x | mu_i, sigma_i) · paso
     """
     import numpy as np
     from scipy.optimize import minimize
@@ -178,19 +153,15 @@ def _fit_gaussian_components(
     x_arr  = np.array([d["x"]    for d in fdp])
     y_real = np.array([d["freq"] for d in fdp])
 
-    # paso real entre bins (no asumido, calculado desde los datos)
     paso = float(x_arr[1] - x_arr[0]) if len(x_arr) > 1 else 0.1
 
     # ── DETECCIÓN DE PICOS POR PRIMERA DERIVADA ───────────────
-    # dy[i] > 0 → subiendo; dy[i] <= 0 → bajando o plano
-    # Pico donde dy cambia de + a - (índice i+1)
     dy = np.diff(y_real)
     peak_candidates = []
     for i in range(len(dy) - 1):
         if dy[i] > 0 and dy[i + 1] <= 0:
             peak_candidates.append(i + 1)
 
-    # Si no hay suficientes picos, completar con los máximos globales restantes
     if len(peak_candidates) < n_components:
         mask = np.ones(len(y_real), dtype=bool)
         for idx in peak_candidates:
@@ -203,7 +174,6 @@ def _fit_gaussian_components(
                 if len(peak_candidates) >= n_components:
                     break
 
-    # Quedarse con los n_components de mayor amplitud, ordenados por posición
     peak_candidates = sorted(
         peak_candidates,
         key=lambda i: y_real[i],
@@ -223,9 +193,6 @@ def _fit_gaussian_components(
         p0.extend([mu, sigma, 1.0 / n_components])
     p0 = np.array(p0, dtype=float)
 
-    # ── MODELO: Σ w_i · N(x|mu_i,sigma_i) · paso ─────────────
-    # Multiplicar por paso convierte densidad → fracción,
-    # igual que en el Excel: Gauss_i = w_i · norm.pdf(x, mu, sigma) · 0.1
     def gauss_pdf(x, mu, sigma):
         return np.exp(-0.5 * ((x - mu) / sigma) ** 2) / (sigma * np.sqrt(2 * np.pi))
 
@@ -237,7 +204,6 @@ def _fit_gaussian_components(
             total += w * gauss_pdf(x, mu, sigma) * paso
         return total
 
-    # ── FUNCIÓN DE COSTO: MSE ─────────────────────────────────
     def cost(params):
         sigmas  = params[1::3]
         weights = params[2::3]
@@ -246,7 +212,6 @@ def _fit_gaussian_components(
         y_hat = model(x_arr, params)
         return float(np.mean((y_real - y_hat) ** 2))
 
-    # ── RESTRICCIÓN: Σ pesos = 1 ─────────────────────────────
     constraints = [{"type": "eq", "fun": lambda p: np.sum(p[2::3]) - 1.0}]
 
     x_min, x_max = float(x_arr.min()), float(x_arr.max())
@@ -261,12 +226,10 @@ def _fit_gaussian_components(
 
     params_opt = result.x
 
-    # ── NORMALIZAR PESOS ──────────────────────────────────────
     weights = params_opt[2::3].copy()
     weights = np.clip(weights, 0, None)
     weights /= weights.sum()
 
-    # ── CONSTRUIR GAUSSIANAS ──────────────────────────────────
     gaussians = []
     for i in range(n_components):
         mu    = float(params_opt[3 * i])
@@ -278,7 +241,6 @@ def _fit_gaussian_components(
             "w":     round(w,     4),
         })
 
-    # ── MÉTRICAS ──────────────────────────────────────────────
     params_norm = params_opt.copy()
     for i in range(n_components):
         params_norm[3 * i + 2] = float(weights[i])
@@ -303,153 +265,334 @@ def _fit_gaussian_components(
 
 
 # ═════════════════════════════════════════════════════════════
-# AJUSTE BETA (para HR)
-# Detección de picos por primera derivada (igual que gaussianas).
-# FDP en fracción simple; modelo × paso_01 para integrar correctamente.
+# AJUSTE BETA GENERALIZADA (para HR)
+#
+# Estrategia basada en el instructivo (Excel de referencia):
+#   - Beta GENERALIZADA con soporte [A, B] por componente
+#   - Detección de picos por primera derivada (igual que gaussianas)
+#   - Spike derecho (HR≈100%): β < 1, lo que coloca la moda en B
+#   - Spike izquierdo (HR≈0%): α < 1
+#   - Parámetros iniciales a partir de la moda y ancho del pico
+#   - Multi-start con distintas concentraciones para evitar mínimos locales
 # ═════════════════════════════════════════════════════════════
 
 def _fit_beta_components(
     fdp: list[dict],
-    n_components: int = 2,
+    n_components: int = 5,
 ) -> tuple[list[dict], float | None, float | None, list[dict]]:
     """
-    Ajusta n_components distribuciones Beta a la FDP de HR.
+    Ajusta n_components distribuciones Beta GENERALIZADAS a la FDP de HR.
 
-    HR está en [0,100] → se normaliza a [0,1] para scipy.stats.beta.
-    FDP esperada: fracción simple (freq = count/total).
+    Cada componente i tiene soporte [A_i, B_i] (en escala 0–100).
+    El modelo es:
+        f_i(x) = w_i · Beta(a_i, b_i, A_i, B_i) · paso
+    donde Beta(a,b,A,B) es la pdf de la beta generalizada escalada a [A,B].
 
-    Modelo: Σ w_i · Beta(x|alpha_i,beta_i) · paso_01
-      donde paso_01 = 0.01 (1% en escala [0,1])
-
-    n_components es configurable (hasta 8 para clima tropical).
+    Detección de picos por primera derivada sobre la FDP suavizada.
+    Spike derecho (HR≈100%): b_i < 1 → moda en B_i = 100.
+    Multi-start para evitar mínimos locales.
     """
     import numpy as np
     from scipy.stats import beta as beta_dist
     from scipy.optimize import minimize
+    from scipy.ndimage import gaussian_filter1d
 
     x_pct  = np.array([d["x"]    for d in fdp])   # escala 0-100
     y_real = np.array([d["freq"] for d in fdp])
-    x_01   = x_pct / 100.0
+    paso   = float(x_pct[1] - x_pct[0]) if len(x_pct) > 1 else 1.0
 
-    # paso en escala [0,1]
-    paso_01 = float(x_01[1] - x_01[0]) if len(x_01) > 1 else 0.01
+    # ── SUAVIZADO PARA DETECCIÓN DE PICOS ─────────────────────
+    sigma_smooth = max(2.0, len(x_pct) / 50.0)
+    y_smooth = gaussian_filter1d(y_real, sigma=sigma_smooth)
 
     # ── DETECCIÓN DE PICOS POR PRIMERA DERIVADA ───────────────
-    dy = np.diff(y_real)
+    # Igual que en gaussianas: dy cambia de + a -
+    dy = np.diff(y_smooth)
     peak_candidates = []
     for i in range(len(dy) - 1):
         if dy[i] > 0 and dy[i + 1] <= 0:
             peak_candidates.append(i + 1)
 
+    # Detectar spike en borde derecho (HR cerca de 100%)
+    # Criterio: la media de los últimos 3 bins suavizados > 1.5× media global
+    mean_freq = float(np.mean(y_smooth))
+    has_right_spike = (
+        len(y_smooth) > 10 and
+        float(np.mean(y_smooth[-3:])) > mean_freq * 1.5
+    )
+    has_left_spike = (
+        len(y_smooth) > 10 and
+        float(np.mean(y_smooth[:3])) > mean_freq * 1.5
+    )
+
+    # Si hay spike derecho y no está en los candidatos, añadirlo
+    if has_right_spike:
+        last_idx = len(x_pct) - 1
+        if not any(abs(p - last_idx) <= 3 for p in peak_candidates):
+            peak_candidates.append(last_idx)
+
+    if has_left_spike:
+        if not any(p <= 3 for p in peak_candidates):
+            peak_candidates.insert(0, 0)
+
+    # Completar con máximos adicionales si faltan candidatos
     if len(peak_candidates) < n_components:
-        mask = np.ones(len(y_real), dtype=bool)
+        mask = np.ones(len(y_smooth), dtype=bool)
         for idx in peak_candidates:
-            mask[max(0, idx - 2):min(len(mask), idx + 3)] = False
+            mask[max(0, idx - 3):min(len(mask), idx + 4)] = False
         remaining = np.where(mask)[0]
         if len(remaining) > 0:
-            extra = remaining[np.argsort(y_real[remaining])[::-1]]
+            extra = remaining[np.argsort(y_smooth[remaining])[::-1]]
             for e in extra:
                 peak_candidates.append(int(e))
                 if len(peak_candidates) >= n_components:
                     break
 
+    # Ordenar por amplitud y tomar los n_components más altos, luego por posición
     peak_candidates = sorted(
         peak_candidates,
-        key=lambda i: y_real[i],
+        key=lambda i: y_smooth[min(i, len(y_smooth)-1)],
         reverse=True,
     )[:n_components]
-    peak_candidates = sorted(peak_candidates)
+    peak_candidates = sorted(peak_candidates)  # ordenar por posición (x)
 
-    # ── PARÁMETROS INICIALES α, β a partir de moda estimada ───
-    p0 = []
-    for k, idx in enumerate(peak_candidates):
-        mode_01 = float(np.clip(x_01[idx], 0.01, 0.99))
-        if k + 1 < len(peak_candidates):
-            dist = abs(x_01[peak_candidates[k + 1]] - mode_01)
-        else:
-            dist = 0.15
-        var_01  = max((dist / 2.5) ** 2, 0.005)
-        inv_var = max(1.0 / var_01, 4.0)
-        alpha0  = max(mode_01 * inv_var, 1.1)
-        beta0   = max((1 - mode_01) * inv_var, 1.1)
-        p0.extend([alpha0, beta0, 1.0 / n_components])
-    p0 = np.array(p0, dtype=float)
+    # ── PDF BETA GENERALIZADA [A, B] ──────────────────────────
+    # f(x; a, b, A, B) = Beta(a, b).pdf((x-A)/(B-A)) / (B-A)
+    # Moda interna (escala [0,1]): (a-1)/(a+b-2) para a>1, b>1
+    # Si b < 1: moda en x=1 (extremo derecho)
+    # Si a < 1: moda en x=0 (extremo izquierdo)
 
-    # ── MODELO: Σ w_i · Beta(x|a,b) · paso_01 ────────────────
-    # Multiplicar por paso_01 convierte densidad → fracción
-    def model(x, params):
-        total = np.zeros_like(x, dtype=float)
-        n = len(params) // 3
+    def beta_gen_pdf(x_arr_pct, a, b, A, B):
+        """PDF beta generalizada [A, B] evaluada en x_arr_pct (escala 0-100)."""
+        width = B - A
+        if width <= 0:
+            return np.zeros_like(x_arr_pct, dtype=float)
+        x01 = (x_arr_pct - A) / width
+        # Solo evaluar donde x01 ∈ (0, 1)
+        pdf = np.zeros_like(x_arr_pct, dtype=float)
+        mask = (x01 > 0) & (x01 < 1)
+        if mask.any():
+            pdf[mask] = beta_dist.pdf(x01[mask], a, b) / width
+        return pdf
+
+    # ── MODELO COMPLETO ───────────────────────────────────────
+    # params: [a1, b1, A1, B1, w1,  a2, b2, A2, B2, w2, ...]
+    # total = Σ w_i · beta_gen_pdf(x, a_i, b_i, A_i, B_i) · paso
+
+    def model(params: np.ndarray) -> np.ndarray:
+        out = np.zeros(len(x_pct), dtype=float)
+        n = len(params) // 5
         for i in range(n):
-            a, b, w = params[3 * i], params[3 * i + 1], params[3 * i + 2]
-            total += w * beta_dist.pdf(x, a, b) * paso_01
-        return total
+            a = params[5*i]
+            b = params[5*i + 1]
+            A = params[5*i + 2]
+            B = params[5*i + 3]
+            w = params[5*i + 4]
+            out += w * beta_gen_pdf(x_pct, a, b, A, B) * paso
+        return out
 
-    def cost(params):
-        alphas  = params[0::3]
-        betas_p = params[1::3]
-        weights = params[2::3]
-        if np.any(alphas < 1.001) or np.any(betas_p < 1.001) or np.any(weights < 0.001):
+    def cost(params: np.ndarray) -> float:
+        # Penalizar pesos negativos o muy pequeños
+        weights = params[4::5]
+        if np.any(weights < 0.001):
             return 1e9
-        y_hat = model(x_01, params)
+        w_sum = float(np.sum(weights))
+        if w_sum <= 0:
+            return 1e9
+        # Normalizar para que Σw = 1 durante evaluación
+        p_norm = params.copy()
+        for i in range(n_components):
+            p_norm[5*i + 4] /= w_sum
+        y_hat = model(p_norm)
         return float(np.mean((y_real - y_hat) ** 2))
 
-    constraints = [{"type": "eq", "fun": lambda p: sum(p[2::3]) - 1.0}]
-    bounds = [(1.001, 500), (1.001, 500), (0.001, 1.0)] * n_components
+    # ── INICIALIZACIÓN BASADA EN PICOS DETECTADOS ─────────────
+    def build_init(concentration: float):
+        """
+        Construye p0 y bounds a partir de los picos detectados.
 
-    result = minimize(
-        cost, p0, method="SLSQP",
-        bounds=bounds,
-        constraints=constraints,
-        options={"maxiter": 500, "ftol": 1e-9},
-    )
+        Para cada pico k en posición x_pct[pk]:
+          - Moda del componente ≈ x_pct[pk]
+          - A = moda - ancho_izquierdo, B = moda + ancho_derecho
+          - Si la moda está en el borde derecho (≥97): b < 1, B = 101
+          - Concentración (a+b) controla el ancho del pico
+        """
+        p0_list: list[float] = []
+        bounds_list: list[tuple] = []
 
-    params_opt = result.x
+        for k, pk in enumerate(peak_candidates):
+            mode_pct = float(x_pct[min(pk, len(x_pct)-1)])
+            is_right_spike = mode_pct >= 97.0
+            is_left_spike  = mode_pct <= 3.0
+
+            # Ancho del pico: distancia al pico vecino / 2 (o rango completo)
+            if k > 0:
+                left_width  = (mode_pct - x_pct[min(peak_candidates[k-1], len(x_pct)-1)]) / 2.0
+            else:
+                left_width  = max(mode_pct - float(x_pct[0]), 5.0)
+            if k < len(peak_candidates) - 1:
+                right_width = (x_pct[min(peak_candidates[k+1], len(x_pct)-1)] - mode_pct) / 2.0
+            else:
+                right_width = max(float(x_pct[-1]) - mode_pct, 5.0)
+
+            left_width  = max(left_width,  3.0)
+            right_width = max(right_width, 3.0)
+
+            A0 = max(0.0,   mode_pct - left_width)
+            B0 = min(101.0, mode_pct + right_width)
+
+            if is_right_spike:
+                # Spike derecho: β < 1 → moda en extremo derecho
+                a0 = max(concentration * 0.5, 3.0)
+                b0 = 0.5   # b < 1 → moda en B
+                A0 = max(0.0, 90.0)
+                B0 = 101.0
+                p0_list.extend([a0, b0, A0, B0, 1.0 / n_components])
+                bounds_list += [
+                    (1.1,   500.0),   # a
+                    (0.05,  0.99),    # b < 1 para spike derecho
+                    (80.0,  98.0),    # A
+                    (100.5, 102.0),   # B (siempre > 100)
+                    (0.001, 1.0),     # w
+                ]
+            elif is_left_spike:
+                # Spike izquierdo: α < 1
+                a0 = 0.5
+                b0 = max(concentration * 0.5, 3.0)
+                A0 = -1.0
+                B0 = min(101.0, 10.0)
+                p0_list.extend([a0, b0, A0, B0, 1.0 / n_components])
+                bounds_list += [
+                    (0.05, 0.99),     # a < 1
+                    (1.1,  500.0),    # b
+                    (-1.0, 2.0),      # A
+                    (5.0,  20.0),     # B
+                    (0.001, 1.0),     # w
+                ]
+            else:
+                # Componente normal: a > 1, b > 1
+                # Moda interna (escala [0,1]): m01 = (a-1)/(a+b-2)
+                # Con a+b ≈ concentration: a = m01*(conc-2)+1, b=(1-m01)*(conc-2)+1
+                width = B0 - A0
+                if width < 1.0:
+                    width = 10.0
+                    A0 = max(0.0, mode_pct - 5.0)
+                    B0 = min(101.0, mode_pct + 5.0)
+                m01 = (mode_pct - A0) / width
+                m01 = np.clip(m01, 0.05, 0.95)
+                a0 = m01 * (concentration - 2.0) + 1.0
+                b0 = (1.0 - m01) * (concentration - 2.0) + 1.0
+                a0 = max(a0, 1.1)
+                b0 = max(b0, 1.1)
+                p0_list.extend([a0, b0, A0, B0, 1.0 / n_components])
+                bounds_list += [
+                    (1.01,  500.0),    # a > 1
+                    (1.01,  500.0),    # b > 1
+                    (-1.0,  mode_pct), # A ≤ moda
+                    (mode_pct, 102.0), # B ≥ moda
+                    (0.001, 1.0),      # w
+                ]
+
+        return np.array(p0_list, dtype=float), bounds_list
+
+    # ── RESTRICCIÓN: Σ pesos = 1 ──────────────────────────────
+    constraints = [{"type": "eq", "fun": lambda p: float(np.sum(p[4::5])) - 1.0}]
+
+    # ── MULTI-START ───────────────────────────────────────────
+    best_result = None
+    best_mse    = np.inf
+
+    for concentration in [10.0, 30.0, 80.0]:
+        p0, bounds = build_init(concentration)
+        try:
+            result = minimize(
+                cost, p0,
+                method="SLSQP",
+                bounds=bounds,
+                constraints=constraints,
+                options={"maxiter": 5000, "ftol": 1e-13},
+            )
+            if result.fun < best_mse:
+                best_mse    = result.fun
+                best_result = result
+        except Exception:
+            continue
+
+    if best_result is None:
+        fdp_out = [{**d, "model": 0.0, "error_range": float(d["freq"])} for d in fdp]
+        return [], None, None, fdp_out
+
+    params_opt = best_result.x
 
     # ── NORMALIZAR PESOS ──────────────────────────────────────
-    weights = params_opt[2::3].copy()
-    weights = np.clip(weights, 0, None)
-    weights /= weights.sum()
+    weights = params_opt[4::5].copy()
+    weights = np.clip(weights, 0.0, None)
+    w_total = weights.sum()
+    if w_total <= 0:
+        fdp_out = [{**d, "model": 0.0, "error_range": float(d["freq"])} for d in fdp]
+        return [], None, None, fdp_out
+    weights /= w_total
 
-    # ── CONSTRUIR COMPONENTES BETA ────────────────────────────
+    # ── CONSTRUIR COMPONENTES BETA GENERALIZADAS ──────────────
     betas_out = []
     for i in range(n_components):
-        a = float(params_opt[3 * i])
-        b = float(params_opt[3 * i + 1])
+        a = float(abs(params_opt[5*i]))
+        b = float(abs(params_opt[5*i + 1]))
+        A = float(params_opt[5*i + 2])
+        B = float(params_opt[5*i + 3])
         w = float(weights[i])
 
-        mode_01  = (a - 1) / (a + b - 2) if (a > 1 and b > 1) else 0.5
-        mode_pct = round(float(mode_01 * 100), 2)
-        var_01   = (a * b) / ((a + b) ** 2 * (a + b + 1))
-        var_pct  = round(float(var_01 * 10000), 4)
+        # Moda en escala [0,1]
+        if a > 1.0 and b > 1.0:
+            mode_01 = (a - 1.0) / (a + b - 2.0)
+        elif b <= 1.0 and a > b:
+            mode_01 = 1.0   # spike derecho
+        elif a <= 1.0 and b > a:
+            mode_01 = 0.0   # spike izquierdo
+        elif a >= b:
+            mode_01 = 1.0
+        else:
+            mode_01 = 0.0
+
+        # Moda en escala [0,100]
+        width    = max(B - A, 1e-6)
+        mode_pct = round(float(A + mode_01 * width), 2)
+        mode_pct = float(np.clip(mode_pct, 0.0, 100.0))
+
+        # Varianza en escala [0,1] interna
+        var_01  = (a * b) / ((a + b) ** 2 * (a + b + 1.0))
+        # Varianza en escala [0,100]
+        var_pct = round(float(var_01 * (width ** 2) / 10000.0), 6)
 
         betas_out.append({
-            "alpha":    round(a, 4),
-            "beta":     round(b, 4),
+            "alpha":    round(a,        4),
+            "beta":     round(b,        4),
+            "A":        round(A,        2),
+            "B":        round(B,        2),
             "mode":     mode_pct,
             "variance": var_pct,
-            "w":        round(w, 4),
+            "w":        round(w,        4),
         })
 
     # ── MÉTRICAS ──────────────────────────────────────────────
     params_norm = params_opt.copy()
     for i in range(n_components):
-        params_norm[3 * i + 2] = float(weights[i])
+        params_norm[5*i + 4] = float(weights[i])
 
-    y_model = model(x_01, params_norm)
+    y_model = model(params_norm)
 
     mse    = float(np.mean((y_real - y_model) ** 2))
     ss_tot = float(np.sum((y_real - np.mean(y_real)) ** 2))
     ss_res = float(np.sum((y_real - y_model) ** 2))
-    r2     = round(1 - ss_res / ss_tot, 4) if ss_tot > 0 else None
+    r2     = round(1.0 - ss_res / ss_tot, 4) if ss_tot > 0 else None
 
     fdp_out = [
         {
             **d,
-            "model":       round(float(y_model[i]), 6),
-            "error_range": round(float(y_real[i] - y_model[i]), 6),
+            "model":       round(float(y_model[j]), 6),
+            "error_range": round(float(y_real[j] - y_model[j]), 6),
         }
-        for i, d in enumerate(fdp)
+        for j, d in enumerate(fdp)
     ]
 
     return betas_out, r2, round(mse, 8), fdp_out
@@ -642,7 +785,7 @@ def get_stats(
     date_from:     Optional[str] = Query(None),
     date_to:       Optional[str] = Query(None),
     n_components:  int           = Query(2, ge=1, le=8,
-                                         description="Número de componentes gaussianas/beta (hasta 8 para clima tropical)"),
+                                         description="Número de componentes gaussianas/beta"),
     db: Session = Depends(get_db),
 ):
     import numpy as np
@@ -692,7 +835,6 @@ def get_stats(
     ]
 
     # ── FDP como fracción simple ──────────────────────────────
-    # Resolución: 0.1°C para T, 1% para HR (según instructivo)
     paso = 0.1 if is_temp else 1.0
     fdp  = _build_fdp(values, paso)
 
@@ -704,7 +846,7 @@ def get_stats(
     completitud_color = _completitud_color(completitud)
 
     # ═══════════════════════════════════════════════════════════
-    # RAMA HR — ajuste Beta
+    # RAMA HR — ajuste Beta generalizada
     # ═══════════════════════════════════════════════════════════
     if is_hr:
         betas, r2, mse, fdp_fitted = ([], None, None, fdp) if len(fdp) <= 4 else \
@@ -736,7 +878,7 @@ def get_stats(
             "date_end":           str(date_end),
             "distribution":       "beta",
             "n_components":       n_components,
-            "fdp_resolution":     paso,           # resolución visible en frontend
+            "fdp_resolution":     paso,
             "fdp":                fdp_fitted,
             "betas":              betas,
             "gaussians":          [],
@@ -777,7 +919,7 @@ def get_stats(
         "date_end":           str(date_end),
         "distribution":       "gaussian",
         "n_components":       n_components,
-        "fdp_resolution":     paso,               # resolución visible en frontend
+        "fdp_resolution":     paso,
         "fdp":                fdp_fitted,
         "gaussians":          gaussians,
         "betas":              [],
@@ -829,7 +971,6 @@ def get_stats_summary_table(
         mean_v = float(np.mean(values))
         std_v  = float(np.std(values))
 
-        # FDP como fracción simple (igual que en /stats)
         fdp = _build_fdp(values, paso)
 
         date_start    = meas[0].measured_at
@@ -1165,7 +1306,6 @@ def get_combined(
     df = pd.DataFrame(joined)
     df["measured_at"] = pd.to_datetime(df["measured_at"])
 
-    # Densidad T×HR con resolución 0.1°C × 1%
     df["T_bin"]  = (df["T"]  / 0.1).round() * 0.1
     df["HR_bin"] = (df["HR"] / 1.0).round() * 1.0
     density_raw = (
