@@ -156,6 +156,143 @@ const heatColor = (val, min, max, type) => {
 }
 
 // ══════════════════════════════════════════════════════════════
+// FDP ENRICHMENT
+// FIX PRINCIPAL: usar valores de componentes calculados por el backend
+// (scipy) en lugar de recalcular en JS. El backend ahora incluye
+// gauss1..gaussN y beta1..betaN en cada punto del fdp.
+// Si no están presentes (backward compat), se usa el campo model.
+// ══════════════════════════════════════════════════════════════
+
+/**
+ * Prepara datos FDP Gaussiana para el gráfico.
+ * - sumaGauss: usa fdp[i].model (calculado por scipy en el backend)
+ * - gaussN:    usa fdp[i].gaussN si está disponible (backend nuevo)
+ *              fallback: recalcula en JS (backend antiguo)
+ */
+function prepareFDPGaussian(fdp, gaussians, paso = 0.1) {
+  if (!fdp?.length) return []
+
+  const hasBackendComponents = fdp[0] && 'gauss1' in fdp[0]
+
+  if (hasBackendComponents) {
+    // ── NUEVO: componentes ya calculadas por el backend con scipy ──
+    return fdp.map(point => {
+      const enriched = { ...point }
+      enriched.sumaGauss = point.model != null ? parseFloat(point.model.toFixed(7)) : 0
+      // gaussN ya viene en el punto, solo asegurar formato
+      if (gaussians?.length) {
+        gaussians.forEach((_, i) => {
+          const key = `gauss${i + 1}`
+          enriched[key] = point[key] != null ? parseFloat(point[key].toFixed(7)) : 0
+        })
+      }
+      return enriched
+    })
+  }
+
+  // ── FALLBACK: recálculo JS para compatibilidad con backend antiguo ──
+  return fdp.map(point => {
+    const enriched = { ...point }
+    enriched.sumaGauss = point.model != null ? parseFloat(point.model.toFixed(7)) : 0
+    if (gaussians?.length) {
+      gaussians.forEach((g, i) => {
+        const exponent = -0.5 * ((point.x - g.mu) / g.sigma) ** 2
+        const pdf = Math.exp(exponent) / (g.sigma * Math.sqrt(2 * Math.PI))
+        enriched[`gauss${i + 1}`] = parseFloat((g.w * pdf * paso).toFixed(7))
+      })
+    }
+    return enriched
+  })
+}
+
+/**
+ * Prepara datos FDP Beta para el gráfico.
+ * - sumaGauss (suma Beta): usa fdp[i].model (calculado por scipy en el backend)
+ * - betaN: usa fdp[i].betaN si está disponible (backend nuevo)
+ *          fallback: recalcula en JS (backend antiguo)
+ *
+ * FIX: el backend ahora incluye betaN en cada punto de fdp.
+ * Esto garantiza que las curvas de componentes individuales sean
+ * IDÉNTICAS a la curva suma, sin divergencia por reimplementación JS.
+ */
+function prepareFDPBeta(fdp, betas) {
+  if (!fdp?.length) return []
+
+  const hasBackendComponents = fdp[0] && 'beta1' in fdp[0]
+
+  if (hasBackendComponents) {
+    // ── NUEVO: componentes ya calculadas por el backend con scipy ──
+    return fdp.map(point => {
+      const enriched = { ...point }
+      enriched.sumaGauss = point.model != null ? parseFloat(point.model.toFixed(7)) : 0
+      if (betas?.length) {
+        betas.forEach((_, i) => {
+          const key = `beta${i + 1}`
+          enriched[key] = point[key] != null ? parseFloat(point[key].toFixed(7)) : 0
+        })
+      }
+      return enriched
+    })
+  }
+
+  // ── FALLBACK: recálculo JS para compatibilidad con backend antiguo ──
+  // Solo se ejecuta si el backend no incluye betaN en los puntos.
+  return fdp.map(point => {
+    const enriched = { ...point }
+    enriched.sumaGauss = point.model != null ? parseFloat(point.model.toFixed(7)) : 0
+    if (betas?.length) {
+      betas.forEach((b, i) => {
+        const A = b.A ?? 0
+        const B = b.B ?? 100
+        const width = B - A
+        if (width <= 0) { enriched[`beta${i + 1}`] = 0; return }
+        const x01 = (point.x - A) / width
+        if (x01 <= 0 || x01 >= 1) { enriched[`beta${i + 1}`] = 0; return }
+        // Usar logGamma numérico estable
+        const val = _betaGenPDFjs(point.x, b.alpha, b.beta, A, B, b.w, 1.0)
+        enriched[`beta${i + 1}`] = parseFloat(val.toFixed(7))
+      })
+    }
+    return enriched
+  })
+}
+
+// ── Funciones matemáticas JS (solo usadas en fallback) ────────
+function _logGammaJS(z) {
+  if (z <= 0) return Infinity
+  if (z < 0.5) return Math.log(Math.PI / Math.sin(Math.PI * z)) - _logGammaJS(1 - z)
+  z -= 1
+  const c = [
+    0.99999999999980993, 676.5203681218851, -1259.1392167224028,
+    771.32342877765313, -176.61502916214059, 12.507343278686905,
+    -0.13857109526572012, 9.9843695780195716e-6, 1.5056327351493116e-7,
+  ]
+  let x = c[0]
+  for (let i = 1; i < 9; i++) x += c[i] / (z + i)
+  const t = z + 7.5
+  return 0.5 * Math.log(2 * Math.PI) + (z + 0.5) * Math.log(t) - t + Math.log(x)
+}
+
+function _betaStdPDFjs(x01, alpha, beta) {
+  const EPS = 1e-12
+  if (x01 <= 0 || x01 >= 1) return 0
+  const xc = Math.max(EPS, Math.min(1 - EPS, x01))
+  const logB = _logGammaJS(alpha) + _logGammaJS(beta) - _logGammaJS(alpha + beta)
+  const logPdf = (alpha - 1) * Math.log(xc) + (beta - 1) * Math.log(1 - xc) - logB
+  const val = Math.exp(logPdf)
+  return isFinite(val) ? val : 0
+}
+
+function _betaGenPDFjs(xPct, alpha, beta_param, A, B, w, paso) {
+  const width = B - A
+  if (width <= 0) return 0
+  const x01 = (xPct - A) / width
+  if (x01 <= 0 || x01 >= 1) return 0
+  const pdf = _betaStdPDFjs(x01, alpha, beta_param) / width
+  return isFinite(pdf) ? w * pdf * paso : 0
+}
+
+// ══════════════════════════════════════════════════════════════
 // SECTION A — Visualización general
 // ══════════════════════════════════════════════════════════════
 function SectionOverview({ stationId, dateFrom, dateTo }) {
@@ -300,103 +437,7 @@ function SectionOverview({ stationId, dateFrom, dateTo }) {
 
 // ══════════════════════════════════════════════════════════════
 // SECTION B — FDP
-// Funciones matemáticas para evaluar PDFs en el frontend
 // ══════════════════════════════════════════════════════════════
-
-function gaussPoint(x, mu, sigma, w, paso) {
-  const exponent = -0.5 * ((x - mu) / sigma) ** 2
-  const pdf = Math.exp(exponent) / (sigma * Math.sqrt(2 * Math.PI))
-  return w * pdf * paso
-}
-
-// ── Log-Gamma y Beta generalizada para el frontend ────────────
-function logGamma(z) {
-  if (z < 0.5) return Math.log(Math.PI / Math.sin(Math.PI * z)) - logGamma(1 - z)
-  z -= 1
-  const g = 7
-  const c = [
-    0.99999999999980993, 676.5203681218851, -1259.1392167224028,
-    771.32342877765313, -176.61502916214059, 12.507343278686905,
-    -0.13857109526572012, 9.9843695780195716e-6, 1.5056327351493116e-7,
-  ]
-  let x = c[0]
-  for (let i = 1; i < g + 2; i++) x += c[i] / (z + i)
-  const t = z + g + 0.5
-  return 0.5 * Math.log(2 * Math.PI) + (z + 0.5) * Math.log(t) - t + Math.log(x)
-}
-
-/**
- * PDF de la distribución Beta estándar en [0,1].
- * Maneja correctamente los casos extremos donde a < 1 o b < 1
- * (distribuciones en U con spike en los bordes).
- */
-function betaStdPDF(x01, alpha, beta) {
-  if (x01 <= 0 || x01 >= 1) return 0
-  // log(pdf) = (a-1)*log(x) + (b-1)*log(1-x) - logB(a,b)
-  const logB = logGamma(alpha) + logGamma(beta) - logGamma(alpha + beta)
-  const logPdf = (alpha - 1) * Math.log(x01) + (beta - 1) * Math.log(1 - x01) - logB
-  return Math.exp(logPdf)
-}
-
-/**
- * PDF de la distribución Beta GENERALIZADA con soporte [A, B].
- * f(x; a, b, A, B) = betaStdPDF((x-A)/(B-A), a, b) / (B-A)
- *
- * Esta es la misma función que usa el backend Python en _fit_beta_components.
- * El paso (1% en escala 0-100) convierte la densidad a fracción.
- */
-function betaGenPDF(xPct, alpha, beta_param, A, B, w, paso) {
-  const width = B - A
-  if (width <= 0) return 0
-  const x01 = (xPct - A) / width
-  if (x01 <= 0 || x01 >= 1) return 0
-  const pdf = betaStdPDF(x01, alpha, beta_param) / width
-  return w * pdf * paso
-}
-
-/**
- * Enriquece la FDP de T con curvas gaussianas individuales y su suma.
- * paso: resolución en °C (0.1 por defecto)
- */
-function enrichFDPGaussian(fdp, gaussians, paso = 0.1) {
-  if (!fdp?.length || !gaussians?.length) return fdp ?? []
-  return fdp.map(point => {
-    const enriched = { ...point }
-    // La suma del modelo ya viene del backend (campo "model")
-    enriched.sumaGauss = point.model != null ? parseFloat(point.model.toFixed(7)) : 0
-    gaussians.forEach((g, i) => {
-      enriched[`gauss${i + 1}`] = parseFloat(
-        gaussPoint(point.x, g.mu, g.sigma, g.w, paso).toFixed(7)
-      )
-    })
-    return enriched
-  })
-}
-
-/**
- * Enriquece la FDP de HR con curvas Beta generalizadas individuales y su suma.
- *
- * CORRECCIÓN CRÍTICA respecto a la versión anterior:
- * - Usa betaGenPDF con soporte [A, B] por componente (igual que el backend)
- * - El paso es 1.0 (en escala 0-100), NO 0.01
- * - La suma (sumaGauss) viene del campo "model" del backend
- */
-function enrichFDPBeta(fdp, betas) {
-  if (!fdp?.length || !betas?.length) return fdp ?? []
-  const paso = 1.0  // resolución 1% en escala [0, 100]
-  return fdp.map(point => {
-    const enriched = { ...point }
-    // Suma del modelo desde el backend (más precisa que recalcular)
-    enriched.sumaGauss = point.model != null ? parseFloat(point.model.toFixed(7)) : 0
-    betas.forEach((b, i) => {
-      const A = b.A ?? 0
-      const B = b.B ?? 100
-      const val = betaGenPDF(point.x, b.alpha, b.beta, A, B, b.w, paso)
-      enriched[`beta${i + 1}`] = parseFloat(val.toFixed(7))
-    })
-    return enriched
-  })
-}
 
 const GaussianCards = ({ gaussians, unit }) => (
   <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 14 }}>
@@ -416,6 +457,10 @@ const GaussianCards = ({ gaussians, unit }) => (
   </div>
 )
 
+// FIX: BetaCards muestra variance (var_01, adimensional) y variance_hr (%²)
+// El backend ahora devuelve ambas:
+//   variance    = var_01 = α·β / ((α+β)²·(α+β+1))          [adimensional]
+//   variance_hr = var_01 × (B−A)²                            [en (%HR)²]
 const BetaCards = ({ betas }) => (
   <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 14 }}>
     {betas.map((b, i) => (
@@ -432,6 +477,17 @@ const BetaCards = ({ betas }) => (
           Soporte = <strong>[{b.A?.toFixed(0)}, {b.B?.toFixed(0)}]</strong>
         </div>
         <div style={{ fontSize: 12, color: '#f1f5f9' }}>Moda = <strong>{b.mode?.toFixed(2)}%</strong></div>
+        {/* FIX: mostrar var_01 (adimensional) — comparable con referencia Excel */}
+        <div style={{ fontSize: 12, color: '#f1f5f9' }}>
+          Var = <strong>{b.variance != null ? b.variance.toFixed(4) : '—'}</strong>
+          <span style={{ fontSize: 10, color: '#64748b' }}> [0,1]</span>
+        </div>
+        {/* Varianza en escala %HR² si está disponible */}
+        {b.variance_hr != null && (
+          <div style={{ fontSize: 11, color: '#64748b' }}>
+            Var<sub>HR</sub> = {b.variance_hr.toFixed(2)}%²
+          </div>
+        )}
         <div style={{ fontSize: 12, color: '#f1f5f9' }}>w = <strong>{((b.w ?? 0) * 100).toFixed(1)}%</strong></div>
       </div>
     ))}
@@ -472,10 +528,10 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
 
   const tPaso = tStats?.fdp_resolution ?? 0.1
 
-  // Enriquecer FDP con curvas individuales
-  const tFdp = tStats ? enrichFDPGaussian(tStats.fdp, tStats.gaussians ?? [], tPaso) : []
-  // CORRECCIÓN: enrichFDPBeta ya no necesita paso_01, usa paso=1 internamente
-  const hFdp = hStats ? enrichFDPBeta(hStats.fdp, hStats.betas ?? []) : []
+  // FIX: usar prepareFDPGaussian / prepareFDPBeta que priorizan
+  // los valores ya calculados por el backend (gauss1..N, beta1..N)
+  const tFdp = tStats ? prepareFDPGaussian(tStats.fdp, tStats.gaussians ?? [], tPaso) : []
+  const hFdp = hStats ? prepareFDPBeta(hStats.fdp, hStats.betas ?? []) : []
 
   const CustomTooltip = ({ active, payload, label, unit }) => {
     if (!active || !payload?.length) return null
@@ -524,7 +580,6 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
     <>
       {loading && <Spinner />}
 
-      {/* ── FDP Temperatura ─────────────────────────────────────── */}
       {!loading && tStats && (
         <SectionCard
           title="FDP — Temperatura (Gaussianas)"
@@ -600,7 +655,6 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
         </SectionCard>
       )}
 
-      {/* ── FDP Humedad Relativa ─────────────────────────────────── */}
       {!loading && hStats && (
         <SectionCard
           title="FDP — Humedad Relativa (Beta generalizada)"
@@ -645,59 +699,17 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
               <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} tickFormatter={v => v.toExponential(1)} />
               <Tooltip content={props => <CustomTooltip {...props} unit="%" />} />
 
-              {/* Frecuencia real (roja) */}
-              <Line
-                type="monotone"
-                dataKey="freq"
-                name="Frec norm"
-                stroke={FDP_FREC_COLOR}
-                strokeWidth={2}
-                dot={false}
-                isAnimationActive={false}
-                legendType="none"
-              />
+              <Line type="monotone" dataKey="freq"      name="Frec norm" stroke={FDP_FREC_COLOR} strokeWidth={2}   dot={false} isAnimationActive={false} legendType="none" />
 
-              {/* Curvas Beta individuales */}
               {(hStats.betas ?? []).map((b, i) => (
-                <Line
-                  key={`beta${i + 1}`}
-                  type="monotone"
-                  dataKey={`beta${i + 1}`}
-                  name={`Beta ${i + 1}`}
-                  stroke={BETA_COLORS[i] ?? '#94a3b8'}
-                  strokeWidth={1.5}
-                  dot={false}
-                  isAnimationActive={false}
-                  legendType="none"
-                />
+                <Line key={`beta${i + 1}`} type="monotone" dataKey={`beta${i + 1}`} name={`Beta ${i + 1}`} stroke={BETA_COLORS[i] ?? '#94a3b8'} strokeWidth={1.5} dot={false} isAnimationActive={false} legendType="none" />
               ))}
 
-              {/* Suma del modelo (blanca) - viene del backend */}
-              <Line
-                type="monotone"
-                dataKey="sumaGauss"
-                name="Beta suma"
-                stroke={FDP_SUMA_COLOR}
-                strokeWidth={3}
-                dot={false}
-                isAnimationActive={false}
-                legendType="none"
-              />
+              <Line type="monotone" dataKey="sumaGauss" name="Beta suma"  stroke={FDP_SUMA_COLOR} strokeWidth={3}   dot={false} isAnimationActive={false} legendType="none" />
 
-              {/* Líneas de referencia en las modas */}
               {(hStats.betas ?? []).map((b, i) => (
-                <ReferenceLine
-                  key={`ref${i}`}
-                  x={b.mode}
-                  stroke={`${BETA_COLORS[i] ?? '#64748b'}80`}
-                  strokeDasharray="4 2"
-                  label={{
-                    value: `m${i+1}=${b.mode?.toFixed(1)}%`,
-                    fontSize: 9,
-                    fill: BETA_COLORS[i] ?? '#64748b',
-                    position: 'insideTopRight',
-                  }}
-                />
+                <ReferenceLine key={`ref${i}`} x={b.mode} stroke={`${BETA_COLORS[i] ?? '#64748b'}80`} strokeDasharray="4 2"
+                  label={{ value: `m${i+1}=${b.mode?.toFixed(1)}%`, fontSize: 9, fill: BETA_COLORS[i] ?? '#64748b', position: 'insideTopRight' }} />
               ))}
             </LineChart>
           </ResponsiveContainer>
@@ -744,9 +756,10 @@ function SectionSummaryTable({ dateFrom, dateTo }) {
   const isHR = variable === 'HR'
   const nComponents = variable === 'TEMP' ? nComponentsT : nComponentsH
 
+  // FIX: columnas HR muestran Moda, Var [0,1], w (igual que BetaCards)
   const compHeaders = Array.from({ length: nComponents }, (_, i) =>
     isHR
-      ? [`Moda${i+1}`, `w${i+1}`]
+      ? [`Moda${i+1}`, `Var${i+1}`, `w${i+1}`]
       : [`μ${i+1}`, `σ${i+1}`, `w${i+1}`]
   ).flat()
 
@@ -754,13 +767,18 @@ function SectionSummaryTable({ dateFrom, dateTo }) {
     if (!data?.stations?.length) return
     const headers = ['Estación', 'Lat', 'Lon', 'Alt (m)', 'Inicio', 'Fin', 'N', 'Compl.%',
       ...compHeaders, 'EMC', 'R²', 'EMC ok', 'R² ok', 'Err ok', 'Σw ok']
+
     const rows = data.stations.map(s => {
       const compVals = Array.from({ length: nComponents }, (_, i) => {
         const c = s.components?.[i]
-        if (!c) return isHR ? ['—', '—'] : ['—', '—', '—']
+        if (!c) return ['—', '—', '—']
         return isHR
-          ? [c.mode ?? '—', ((c.w ?? 0) * 100).toFixed(1) + '%']
-          : [c.mu ?? '—', c.sigma ?? '—', ((c.w ?? 0) * 100).toFixed(1) + '%']
+          ? [
+              c.mode?.toFixed(2)     ?? '—',
+              c.variance != null ? c.variance.toFixed(4) : '—',
+              ((c.w ?? 0) * 100).toFixed(1) + '%',
+            ]
+          : [c.mu?.toFixed(2) ?? '—', c.sigma?.toFixed(3) ?? '—', ((c.w ?? 0) * 100).toFixed(1) + '%']
       }).flat()
       return [
         s.station_name,
@@ -833,12 +851,16 @@ function SectionSummaryTable({ dateFrom, dateTo }) {
                 {data.stations.map((s, idx) => {
                   const compVals = Array.from({ length: nComponents }, (_, i) => {
                     const c = s.components?.[i]
-                    if (!c) return isHR ? ['—', '—'] : ['—', '—', '—']
+                    if (!c) return ['—', '—', '—']
                     return isHR
-                      ? [c.mode?.toFixed(1) ?? '—', ((c.w ?? 0)*100).toFixed(1)+'%']
+                      ? [
+                          c.mode?.toFixed(1)    ?? '—',
+                          c.variance != null ? c.variance.toFixed(4) : '—',
+                          ((c.w ?? 0)*100).toFixed(1)+'%',
+                        ]
                       : [c.mu?.toFixed(2) ?? '—', c.sigma?.toFixed(3) ?? '—', ((c.w ?? 0)*100).toFixed(1)+'%']
                   }).flat()
-                  const q = s.quality
+                  const q  = s.quality
                   const cc = COMPLETITUD_COLORS[s.completitud_color] || COMPLETITUD_COLORS.red
                   return (
                     <tr key={s.station_code} style={{ borderBottom: '1px solid #1e293b' }}>
@@ -883,6 +905,13 @@ function SectionSummaryTable({ dateFrom, dateTo }) {
               }}>{c.label}</span>
             ))}
           </div>
+
+          {/* FIX: nota al pie explica que Var es la varianza interna [0,1] */}
+          {isHR && (
+            <div style={{ marginTop: 12, padding: '8px 12px', background: '#0f172a', borderRadius: 6, fontSize: 11, color: '#64748b', fontFamily: 'monospace' }}>
+              Var = α·β / ((α+β)²·(α+β+1)) &nbsp;[adimensional, escala interna 0–1 de la distribución Beta]
+            </div>
+          )}
         </Card>
       )}
 
@@ -1159,8 +1188,7 @@ function SectionDailyProfile({ stationId, dateFrom, dateTo }) {
               <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} unit="%" domain={[0, 100]} />
               <Tooltip
                 labelFormatter={h => `${String(h).padStart(2,'0')}:00`}
-                contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }}
-              />
+                contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }} />
               <Legend />
               <Area type="monotone" dataKey="max"  name="Máx"      stroke="#3b82f6" fill="none"      strokeWidth={1} opacity={0.5} dot={false} />
               <Area type="monotone" dataKey="q75"  name="Q75"      stroke="#6366f1" fill="none"      strokeWidth={1} strokeDasharray="4 2" dot={false} />

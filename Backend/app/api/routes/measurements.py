@@ -146,6 +146,11 @@ def _fit_gaussian_components(
 
     Detección de picos por primera derivada (cambio de signo + → -).
     Modelo: Σ w_i · N(x | mu_i, sigma_i) · paso
+
+    FIX: fdp_out ahora incluye gauss1, gauss2, ... gaussN para cada componente
+    individual, calculadas directamente en el backend.
+    Esto evita que el frontend tenga que recalcular con su propia implementación
+    matemática, eliminando cualquier posible divergencia.
     """
     import numpy as np
     from scipy.optimize import minimize
@@ -247,33 +252,38 @@ def _fit_gaussian_components(
 
     y_model = model(x_arr, params_norm)
 
+    # ── FIX: calcular componentes individuales por punto ──────
+    # Cada gauss_i(x) = w_i * N(x | mu_i, sigma_i) * paso
+    # Se incluyen en fdp_out para que el frontend los use directamente
+    y_components = []
+    for i in range(n_components):
+        mu    = params_norm[3 * i]
+        sigma = params_norm[3 * i + 1]
+        w     = params_norm[3 * i + 2]
+        y_components.append(w * gauss_pdf(x_arr, mu, sigma) * paso)
+
     mse    = float(np.mean((y_real - y_model) ** 2))
     ss_tot = float(np.sum((y_real - np.mean(y_real)) ** 2))
     ss_res = float(np.sum((y_real - y_model) ** 2))
     r2     = round(1 - ss_res / ss_tot, 4) if ss_tot > 0 else None
 
-    fdp_out = [
-        {
+    fdp_out = []
+    for j, d in enumerate(fdp):
+        point = {
             **d,
-            "model":       round(float(y_model[i]), 6),
-            "error_range": round(float(y_real[i] - y_model[i]), 6),
+            "model":       round(float(y_model[j]), 7),
+            "error_range": round(float(y_real[j] - y_model[j]), 7),
         }
-        for i, d in enumerate(fdp)
-    ]
+        # Añadir cada componente gaussiana individual
+        for i, y_comp in enumerate(y_components):
+            point[f"gauss{i + 1}"] = round(float(y_comp[j]), 7)
+        fdp_out.append(point)
 
     return gaussians, r2, round(mse, 8), fdp_out
 
 
 # ═════════════════════════════════════════════════════════════
 # AJUSTE BETA GENERALIZADA (para HR)
-#
-# Estrategia basada en el instructivo (Excel de referencia):
-#   - Beta GENERALIZADA con soporte [A, B] por componente
-#   - Detección de picos por primera derivada (igual que gaussianas)
-#   - Spike derecho (HR≈100%): β < 1, lo que coloca la moda en B
-#   - Spike izquierdo (HR≈0%): α < 1
-#   - Parámetros iniciales a partir de la moda y ancho del pico
-#   - Multi-start con distintas concentraciones para evitar mínimos locales
 # ═════════════════════════════════════════════════════════════
 
 def _fit_beta_components(
@@ -288,9 +298,14 @@ def _fit_beta_components(
         f_i(x) = w_i · Beta(a_i, b_i, A_i, B_i) · paso
     donde Beta(a,b,A,B) es la pdf de la beta generalizada escalada a [A,B].
 
-    Detección de picos por primera derivada sobre la FDP suavizada.
-    Spike derecho (HR≈100%): b_i < 1 → moda en B_i = 100.
-    Multi-start para evitar mínimos locales.
+    FIX PRINCIPAL: fdp_out ahora incluye beta1, beta2, ..., betaN calculados
+    directamente por scipy en el backend. El frontend debe usar estos valores
+    directamente (sin recalcular) para garantizar que las curvas de componentes
+    individuales sean idénticas a la curva suma (model).
+
+    Otros fixes:
+    - Límites A/B acotados con search_margin controlado
+    - Varianza: variance = var_01 (interna [0,1]), variance_hr = var_01 * (B-A)²
     """
     import numpy as np
     from scipy.stats import beta as beta_dist
@@ -306,15 +321,12 @@ def _fit_beta_components(
     y_smooth = gaussian_filter1d(y_real, sigma=sigma_smooth)
 
     # ── DETECCIÓN DE PICOS POR PRIMERA DERIVADA ───────────────
-    # Igual que en gaussianas: dy cambia de + a -
     dy = np.diff(y_smooth)
     peak_candidates = []
     for i in range(len(dy) - 1):
         if dy[i] > 0 and dy[i + 1] <= 0:
             peak_candidates.append(i + 1)
 
-    # Detectar spike en borde derecho (HR cerca de 100%)
-    # Criterio: la media de los últimos 3 bins suavizados > 1.5× media global
     mean_freq = float(np.mean(y_smooth))
     has_right_spike = (
         len(y_smooth) > 10 and
@@ -325,7 +337,6 @@ def _fit_beta_components(
         float(np.mean(y_smooth[:3])) > mean_freq * 1.5
     )
 
-    # Si hay spike derecho y no está en los candidatos, añadirlo
     if has_right_spike:
         last_idx = len(x_pct) - 1
         if not any(abs(p - last_idx) <= 3 for p in peak_candidates):
@@ -335,7 +346,6 @@ def _fit_beta_components(
         if not any(p <= 3 for p in peak_candidates):
             peak_candidates.insert(0, 0)
 
-    # Completar con máximos adicionales si faltan candidatos
     if len(peak_candidates) < n_components:
         mask = np.ones(len(y_smooth), dtype=bool)
         for idx in peak_candidates:
@@ -348,37 +358,43 @@ def _fit_beta_components(
                 if len(peak_candidates) >= n_components:
                     break
 
-    # Ordenar por amplitud y tomar los n_components más altos, luego por posición
     peak_candidates = sorted(
         peak_candidates,
         key=lambda i: y_smooth[min(i, len(y_smooth)-1)],
         reverse=True,
     )[:n_components]
-    peak_candidates = sorted(peak_candidates)  # ordenar por posición (x)
+    peak_candidates = sorted(peak_candidates)
 
-    # ── PDF BETA GENERALIZADA [A, B] ──────────────────────────
-    # f(x; a, b, A, B) = Beta(a, b).pdf((x-A)/(B-A)) / (B-A)
-    # Moda interna (escala [0,1]): (a-1)/(a+b-2) para a>1, b>1
-    # Si b < 1: moda en x=1 (extremo derecho)
-    # Si a < 1: moda en x=0 (extremo izquierdo)
+    # ── Helper: extensión real del pico ───────────────────────
+    def get_peak_extent(pk_idx: int, threshold_frac: float = 0.20) -> tuple[float, float]:
+        peak_val = y_smooth[min(pk_idx, len(y_smooth) - 1)]
+        if peak_val <= 0:
+            return 0.0, 100.0
+        threshold = max(peak_val * threshold_frac, mean_freq * 0.30)
 
+        li = pk_idx
+        while li > 0 and y_smooth[li] > threshold:
+            li -= 1
+
+        ri = pk_idx
+        while ri < len(x_pct) - 1 and y_smooth[ri] > threshold:
+            ri += 1
+
+        return float(x_pct[li]), float(x_pct[ri])
+
+    # ── PDF Beta generalizada [A, B] ──────────────────────────
     def beta_gen_pdf(x_arr_pct, a, b, A, B):
-        """PDF beta generalizada [A, B] evaluada en x_arr_pct (escala 0-100)."""
         width = B - A
         if width <= 0:
             return np.zeros_like(x_arr_pct, dtype=float)
         x01 = (x_arr_pct - A) / width
-        # Solo evaluar donde x01 ∈ (0, 1)
         pdf = np.zeros_like(x_arr_pct, dtype=float)
         mask = (x01 > 0) & (x01 < 1)
         if mask.any():
             pdf[mask] = beta_dist.pdf(x01[mask], a, b) / width
         return pdf
 
-    # ── MODELO COMPLETO ───────────────────────────────────────
-    # params: [a1, b1, A1, B1, w1,  a2, b2, A2, B2, w2, ...]
-    # total = Σ w_i · beta_gen_pdf(x, a_i, b_i, A_i, B_i) · paso
-
+    # ── Modelo completo ───────────────────────────────────────
     def model(params: np.ndarray) -> np.ndarray:
         out = np.zeros(len(x_pct), dtype=float)
         n = len(params) // 5
@@ -392,31 +408,20 @@ def _fit_beta_components(
         return out
 
     def cost(params: np.ndarray) -> float:
-        # Penalizar pesos negativos o muy pequeños
         weights = params[4::5]
         if np.any(weights < 0.001):
             return 1e9
         w_sum = float(np.sum(weights))
         if w_sum <= 0:
             return 1e9
-        # Normalizar para que Σw = 1 durante evaluación
         p_norm = params.copy()
         for i in range(n_components):
             p_norm[5*i + 4] /= w_sum
         y_hat = model(p_norm)
         return float(np.mean((y_real - y_hat) ** 2))
 
-    # ── INICIALIZACIÓN BASADA EN PICOS DETECTADOS ─────────────
+    # ── Inicialización con límites ajustados ──────────────────
     def build_init(concentration: float):
-        """
-        Construye p0 y bounds a partir de los picos detectados.
-
-        Para cada pico k en posición x_pct[pk]:
-          - Moda del componente ≈ x_pct[pk]
-          - A = moda - ancho_izquierdo, B = moda + ancho_derecho
-          - Si la moda está en el borde derecho (≥97): b < 1, B = 101
-          - Concentración (a+b) controla el ancho del pico
-        """
         p0_list: list[float] = []
         bounds_list: list[tuple] = []
 
@@ -425,59 +430,63 @@ def _fit_beta_components(
             is_right_spike = mode_pct >= 97.0
             is_left_spike  = mode_pct <= 3.0
 
-            # Ancho del pico: distancia al pico vecino / 2 (o rango completo)
+            A_ext, B_ext = get_peak_extent(pk)
+
             if k > 0:
-                left_width  = (mode_pct - x_pct[min(peak_candidates[k-1], len(x_pct)-1)]) / 2.0
+                prev_mode = float(x_pct[min(peak_candidates[k-1], len(x_pct)-1)])
+                left_width = max((mode_pct - prev_mode) / 2.0, 3.0)
             else:
-                left_width  = max(mode_pct - float(x_pct[0]), 5.0)
+                left_width = max(mode_pct - A_ext, 3.0)
+
             if k < len(peak_candidates) - 1:
-                right_width = (x_pct[min(peak_candidates[k+1], len(x_pct)-1)] - mode_pct) / 2.0
+                next_mode = float(x_pct[min(peak_candidates[k+1], len(x_pct)-1)])
+                right_width = max((next_mode - mode_pct) / 2.0, 3.0)
             else:
-                right_width = max(float(x_pct[-1]) - mode_pct, 5.0)
+                right_width = max(B_ext - mode_pct, 3.0)
 
-            left_width  = max(left_width,  3.0)
-            right_width = max(right_width, 3.0)
+            A0 = max(A_ext, max(0.0, mode_pct - left_width))
+            B0 = min(B_ext, min(101.0, mode_pct + right_width))
 
-            A0 = max(0.0,   mode_pct - left_width)
-            B0 = min(101.0, mode_pct + right_width)
+            A0 = min(A0, mode_pct - 3.0)
+            B0 = max(B0, mode_pct + 3.0)
+            A0 = max(A0, 0.0)
+            B0 = min(B0, 101.0)
 
             if is_right_spike:
-                # Spike derecho: β < 1 → moda en extremo derecho
                 a0 = max(concentration * 0.5, 3.0)
-                b0 = 0.5   # b < 1 → moda en B
+                b0 = 0.5
                 A0 = max(0.0, 90.0)
                 B0 = 101.0
                 p0_list.extend([a0, b0, A0, B0, 1.0 / n_components])
                 bounds_list += [
-                    (1.1,   500.0),   # a
-                    (0.05,  0.99),    # b < 1 para spike derecho
-                    (80.0,  98.0),    # A
-                    (100.5, 102.0),   # B (siempre > 100)
-                    (0.001, 1.0),     # w
+                    (1.1,   500.0),
+                    (0.05,  0.99),
+                    (80.0,  98.0),
+                    (100.5, 102.0),
+                    (0.001, 1.0),
                 ]
+
             elif is_left_spike:
-                # Spike izquierdo: α < 1
                 a0 = 0.5
                 b0 = max(concentration * 0.5, 3.0)
                 A0 = -1.0
                 B0 = min(101.0, 10.0)
                 p0_list.extend([a0, b0, A0, B0, 1.0 / n_components])
                 bounds_list += [
-                    (0.05, 0.99),     # a < 1
-                    (1.1,  500.0),    # b
-                    (-1.0, 2.0),      # A
-                    (5.0,  20.0),     # B
-                    (0.001, 1.0),     # w
+                    (0.05, 0.99),
+                    (1.1,  500.0),
+                    (-1.0, 2.0),
+                    (5.0,  20.0),
+                    (0.001, 1.0),
                 ]
+
             else:
-                # Componente normal: a > 1, b > 1
-                # Moda interna (escala [0,1]): m01 = (a-1)/(a+b-2)
-                # Con a+b ≈ concentration: a = m01*(conc-2)+1, b=(1-m01)*(conc-2)+1
                 width = B0 - A0
                 if width < 1.0:
                     width = 10.0
                     A0 = max(0.0, mode_pct - 5.0)
                     B0 = min(101.0, mode_pct + 5.0)
+
                 m01 = (mode_pct - A0) / width
                 m01 = np.clip(m01, 0.05, 0.95)
                 a0 = m01 * (concentration - 2.0) + 1.0
@@ -485,24 +494,37 @@ def _fit_beta_components(
                 a0 = max(a0, 1.1)
                 b0 = max(b0, 1.1)
                 p0_list.extend([a0, b0, A0, B0, 1.0 / n_components])
+
+                search_margin = max(8.0, width * 0.40)
+
+                A_lo = max(0.0, A0 - search_margin)
+                A_hi = max(0.0, min(mode_pct - 1.0, A0 + search_margin * 0.5))
+                B_lo = max(mode_pct + 1.0, B0 - search_margin * 0.5)
+                B_hi = min(101.0, B0 + search_margin)
+
+                if A_lo >= A_hi:
+                    A_hi = max(A_lo + 1.0, mode_pct - 1.0)
+                if B_lo >= B_hi:
+                    B_lo = min(B_hi - 1.0, mode_pct + 1.0)
+
                 bounds_list += [
-                    (1.01,  500.0),    # a > 1
-                    (1.01,  500.0),    # b > 1
-                    (-1.0,  mode_pct), # A ≤ moda
-                    (mode_pct, 102.0), # B ≥ moda
-                    (0.001, 1.0),      # w
+                    (1.01,  500.0),
+                    (1.01,  500.0),
+                    (A_lo,  A_hi),
+                    (B_lo,  B_hi),
+                    (0.001, 1.0),
                 ]
 
         return np.array(p0_list, dtype=float), bounds_list
 
-    # ── RESTRICCIÓN: Σ pesos = 1 ──────────────────────────────
+    # ── Restricción: Σ pesos = 1 ──────────────────────────────
     constraints = [{"type": "eq", "fun": lambda p: float(np.sum(p[4::5])) - 1.0}]
 
-    # ── MULTI-START ───────────────────────────────────────────
+    # ── Multi-start ───────────────────────────────────────────
     best_result = None
     best_mse    = np.inf
 
-    for concentration in [10.0, 30.0, 80.0]:
+    for concentration in [10.0, 30.0, 80.0, 200.0]:
         p0, bounds = build_init(concentration)
         try:
             result = minimize(
@@ -524,7 +546,7 @@ def _fit_beta_components(
 
     params_opt = best_result.x
 
-    # ── NORMALIZAR PESOS ──────────────────────────────────────
+    # ── Normalizar pesos ──────────────────────────────────────
     weights = params_opt[4::5].copy()
     weights = np.clip(weights, 0.0, None)
     w_total = weights.sum()
@@ -533,67 +555,85 @@ def _fit_beta_components(
         return [], None, None, fdp_out
     weights /= w_total
 
-    # ── CONSTRUIR COMPONENTES BETA GENERALIZADAS ──────────────
+    params_norm = params_opt.copy()
+    for i in range(n_components):
+        params_norm[5*i + 4] = float(weights[i])
+
+    # ── FIX: calcular componentes individuales con scipy ──────
+    # Cada beta_i(x) = w_i * BetaGen(x | a_i, b_i, A_i, B_i) * paso
+    # Se calculan aquí con scipy.stats.beta para máxima precisión
+    # y se incluyen en fdp_out. El frontend usa estos valores directamente.
+    y_components = []
+    for i in range(n_components):
+        a = float(abs(params_norm[5*i]))
+        b = float(abs(params_norm[5*i + 1]))
+        A = float(params_norm[5*i + 2])
+        B = float(params_norm[5*i + 3])
+        w = float(params_norm[5*i + 4])
+        y_comp = w * beta_gen_pdf(x_pct, a, b, A, B) * paso
+        y_components.append(y_comp)
+
+    # ── Modelo total (suma de componentes normalizadas) ────────
+    y_model = sum(y_components)
+
+    # ── Construir componentes Beta generalizadas para output ──
     betas_out = []
     for i in range(n_components):
-        a = float(abs(params_opt[5*i]))
-        b = float(abs(params_opt[5*i + 1]))
-        A = float(params_opt[5*i + 2])
-        B = float(params_opt[5*i + 3])
-        w = float(weights[i])
+        a = float(abs(params_norm[5*i]))
+        b = float(abs(params_norm[5*i + 1]))
+        A = float(params_norm[5*i + 2])
+        B = float(params_norm[5*i + 3])
+        w = float(params_norm[5*i + 4])
 
-        # Moda en escala [0,1]
         if a > 1.0 and b > 1.0:
             mode_01 = (a - 1.0) / (a + b - 2.0)
         elif b <= 1.0 and a > b:
-            mode_01 = 1.0   # spike derecho
+            mode_01 = 1.0
         elif a <= 1.0 and b > a:
-            mode_01 = 0.0   # spike izquierdo
+            mode_01 = 0.0
         elif a >= b:
             mode_01 = 1.0
         else:
             mode_01 = 0.0
 
-        # Moda en escala [0,100]
         width    = max(B - A, 1e-6)
         mode_pct = round(float(A + mode_01 * width), 2)
         mode_pct = float(np.clip(mode_pct, 0.0, 100.0))
 
-        # Varianza en escala [0,1] interna
+        # variance = var_01 (varianza interna Beta [0,1], adimensional)
+        # variance_hr = var_01 * (B-A)²  (varianza en unidades %HR²)
         var_01  = (a * b) / ((a + b) ** 2 * (a + b + 1.0))
-        # Varianza en escala [0,100]
-        var_pct = round(float(var_01 * (width ** 2) / 10000.0), 6)
+        var_hr  = round(float(var_01 * (width ** 2)), 4)
 
         betas_out.append({
-            "alpha":    round(a,        4),
-            "beta":     round(b,        4),
-            "A":        round(A,        2),
-            "B":        round(B,        2),
-            "mode":     mode_pct,
-            "variance": var_pct,
-            "w":        round(w,        4),
+            "alpha":       round(a,      4),
+            "beta":        round(b,      4),
+            "A":           round(A,      2),
+            "B":           round(B,      2),
+            "mode":        mode_pct,
+            "variance":    round(float(var_01), 6),   # adimensional [0,1]
+            "variance_hr": var_hr,                     # en (%HR)²
+            "w":           round(w,      4),
         })
 
-    # ── MÉTRICAS ──────────────────────────────────────────────
-    params_norm = params_opt.copy()
-    for i in range(n_components):
-        params_norm[5*i + 4] = float(weights[i])
-
-    y_model = model(params_norm)
-
+    # ── Métricas ──────────────────────────────────────────────
     mse    = float(np.mean((y_real - y_model) ** 2))
     ss_tot = float(np.sum((y_real - np.mean(y_real)) ** 2))
     ss_res = float(np.sum((y_real - y_model) ** 2))
     r2     = round(1.0 - ss_res / ss_tot, 4) if ss_tot > 0 else None
 
-    fdp_out = [
-        {
+    # ── FIX: fdp_out incluye componentes individuales betaN ───
+    fdp_out = []
+    for j, d in enumerate(fdp):
+        point = {
             **d,
-            "model":       round(float(y_model[j]), 6),
-            "error_range": round(float(y_real[j] - y_model[j]), 6),
+            "model":       round(float(y_model[j]), 7),
+            "error_range": round(float(y_real[j] - y_model[j]), 7),
         }
-        for j, d in enumerate(fdp)
-    ]
+        # Añadir cada componente beta individual (calculada por scipy)
+        for i, y_comp in enumerate(y_components):
+            point[f"beta{i + 1}"] = round(float(y_comp[j]), 7)
+        fdp_out.append(point)
 
     return betas_out, r2, round(mse, 8), fdp_out
 
@@ -602,6 +642,7 @@ def _fit_beta_components(
 def _quality_flags(mse, r2, fdp_data):
     errors  = [abs(d.get("error_range", 0)) for d in fdp_data if "error_range" in d]
     max_err = max(errors) if errors else None
+    w_sum   = None
     return {
         "mse_ok":           mse is not None and mse <= 1e-5,
         "r2_ok":            r2  is not None and r2  >= 0.95,
@@ -879,7 +920,7 @@ def get_stats(
             "distribution":       "beta",
             "n_components":       n_components,
             "fdp_resolution":     paso,
-            "fdp":                fdp_fitted,
+            "fdp":                fdp_fitted,   # incluye betaN por punto
             "betas":              betas,
             "gaussians":          [],
             "r2":                 r2,
@@ -920,7 +961,7 @@ def get_stats(
         "distribution":       "gaussian",
         "n_components":       n_components,
         "fdp_resolution":     paso,
-        "fdp":                fdp_fitted,
+        "fdp":                fdp_fitted,   # incluye gaussN por punto
         "gaussians":          gaussians,
         "betas":              [],
         "r2":                 r2,
