@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import {
   AreaChart, Area, BarChart, Bar, ScatterChart, Scatter,
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -41,17 +41,17 @@ const COMPLETITUD_COLORS = {
 
 // ── Paleta FDP igual al Excel ─────────────────────────────────
 const GAUSS_COLORS = [
-  '#f97316', // naranja  – Gauss1
-  '#22c55e', // verde    – Gauss2
-  '#a78bfa', // violeta  – Gauss3
-  '#facc15', // amarillo – Gauss4
+  '#f97316',
+  '#22c55e',
+  '#a78bfa',
+  '#facc15',
 ]
 const BETA_COLORS = [
-  '#94a3b8', // gris     – Beta1
-  '#eab308', // amarillo – Beta2
-  '#38bdf8', // celeste  – Beta3
-  '#4ade80', // verde    – Beta4
-  '#c084fc', // morado   – Beta5
+  '#94a3b8',
+  '#eab308',
+  '#38bdf8',
+  '#4ade80',
+  '#c084fc',
 ]
 const FDP_SUMA_COLOR  = '#e2e8f0'
 const FDP_FREC_COLOR  = '#ef4444'
@@ -156,30 +156,289 @@ const heatColor = (val, min, max, type) => {
 }
 
 // ══════════════════════════════════════════════════════════════
-// FDP ENRICHMENT
-// FIX PRINCIPAL: usar valores de componentes calculados por el backend
-// (scipy) en lugar de recalcular en JS. El backend ahora incluye
-// gauss1..gaussN y beta1..betaN en cada punto del fdp.
-// Si no están presentes (backward compat), se usa el campo model.
+// VIRIDIS COLORMAP
 // ══════════════════════════════════════════════════════════════
+function viridisCmap(t) {
+  const clamp = v => Math.max(0, Math.min(255, Math.round(v)))
+  const stops = [
+    [68,  1,  84],
+    [72,  40, 120],
+    [62,  74, 137],
+    [49, 104, 142],
+    [38, 130, 142],
+    [31, 158, 137],
+    [53, 183, 121],
+    [110,206, 88],
+    [180,222, 44],
+    [253,231, 37],
+  ]
+  const n = stops.length - 1
+  const idx = Math.min(n - 1, Math.floor(t * n))
+  const frac = t * n - idx
+  const [r0,g0,b0] = stops[idx]
+  const [r1,g1,b1] = stops[Math.min(n, idx + 1)]
+  return [
+    clamp(r0 + (r1 - r0) * frac),
+    clamp(g0 + (g1 - g0) * frac),
+    clamp(b0 + (b1 - b0) * frac),
+  ]
+}
 
-/**
- * Prepara datos FDP Gaussiana para el gráfico.
- * - sumaGauss: usa fdp[i].model (calculado por scipy en el backend)
- * - gaussN:    usa fdp[i].gaussN si está disponible (backend nuevo)
- *              fallback: recalcula en JS (backend antiguo)
- */
+// ══════════════════════════════════════════════════════════════
+// KDE BIVARIADA CON KERNEL GAUSSIANO
+// ══════════════════════════════════════════════════════════════
+function computeKDE2D(points, nx, ny, xMin, xMax, yMin, yMax, bwX, bwY) {
+  const grid = new Float64Array(nx * ny)
+  const dx = (xMax - xMin) / (nx - 1)
+  const dy = (yMax - yMin) / (ny - 1)
+  const coeff = 1 / (2 * Math.PI * bwX * bwY * points.length)
+
+  for (const [px, py, w] of points) {
+    const weight = w ?? 1
+    const ixMin = Math.max(0, Math.floor((px - 3 * bwX - xMin) / dx))
+    const ixMax = Math.min(nx - 1, Math.ceil((px + 3 * bwX - xMin) / dx))
+    const iyMin = Math.max(0, Math.floor((py - 3 * bwY - yMin) / dy))
+    const iyMax = Math.min(ny - 1, Math.ceil((py + 3 * bwY - yMin) / dy))
+
+    for (let ix = ixMin; ix <= ixMax; ix++) {
+      const x = xMin + ix * dx
+      const ux = (x - px) / bwX
+      for (let iy = iyMin; iy <= iyMax; iy++) {
+        const y = yMin + iy * dy
+        const uy = (y - py) / bwY
+        grid[iy * nx + ix] += weight * coeff * Math.exp(-0.5 * (ux * ux + uy * uy))
+      }
+    }
+  }
+  return grid
+}
+
+// ══════════════════════════════════════════════════════════════
+// CANVAS KDE HEATMAP (d.1)
+// ══════════════════════════════════════════════════════════════
+function KDEHeatmapCanvas({ densityPoints, tMin, tMax, hrMin, hrMax, width, height }) {
+  const canvasRef = useRef(null)
+
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas || !densityPoints?.length) return
+    const ctx = canvas.getContext('2d')
+
+    const pad = { top: 20, right: 90, bottom: 50, left: 60 }
+    const plotW = width  - pad.left - pad.right
+    const plotH = height - pad.top  - pad.bottom
+
+    const nx = Math.min(200, plotW)
+    const ny = Math.min(200, plotH)
+
+    const pts = densityPoints.map(d => [d.T, d.HR, d.density ?? 1])
+
+    const n    = pts.length
+    const stdT = Math.max(0.5, (tMax - tMin) / 8)
+    const stdH = Math.max(2,   (hrMax - hrMin) / 8)
+    const bwT  = 1.06 * stdT * Math.pow(n, -0.2)
+    const bwH  = 1.06 * stdH * Math.pow(n, -0.2)
+
+    const grid = computeKDE2D(pts, nx, ny, tMin, tMax, hrMin, hrMax, bwT, bwH)
+
+    let maxVal = 0
+    for (let i = 0; i < grid.length; i++) if (grid[i] > maxVal) maxVal = grid[i]
+    if (maxVal === 0) return
+
+    canvas.width  = width
+    canvas.height = height
+    ctx.clearRect(0, 0, width, height)
+
+    ctx.fillStyle = '#0f172a'
+    ctx.fillRect(0, 0, width, height)
+
+    ctx.fillStyle = '#0a0a1a'
+    ctx.fillRect(pad.left, pad.top, plotW, plotH)
+
+    const imgData = ctx.createImageData(plotW, plotH)
+    const scaleX = (nx - 1) / plotW
+    const scaleY = (ny - 1) / plotH
+
+    for (let py = 0; py < plotH; py++) {
+      for (let px = 0; px < plotW; px++) {
+        const gy = (ny - 1) - Math.round(py * scaleY)
+        const gx = Math.round(px * scaleX)
+        const val = grid[Math.max(0, Math.min(ny * nx - 1, gy * nx + gx))] / maxVal
+        const [r, g, b] = viridisCmap(val)
+        const idx = (py * plotW + px) * 4
+        imgData.data[idx]     = r
+        imgData.data[idx + 1] = g
+        imgData.data[idx + 2] = b
+        imgData.data[idx + 3] = 255
+      }
+    }
+    ctx.putImageData(imgData, pad.left, pad.top)
+
+    // ── Ejes ──
+    ctx.strokeStyle = '#94a3b8'
+    ctx.lineWidth   = 0.5
+    ctx.fillStyle   = '#94a3b8'
+    ctx.font        = '11px monospace'
+
+    // Eje X (Temperatura)
+    const tTicks = []
+    for (let t = Math.ceil(tMin); t <= Math.floor(tMax); t += 2.5) tTicks.push(t)
+    ctx.beginPath()
+    ctx.moveTo(pad.left, pad.top + plotH)
+    ctx.lineTo(pad.left + plotW, pad.top + plotH)
+    ctx.stroke()
+
+    tTicks.forEach(t => {
+      const x = pad.left + ((t - tMin) / (tMax - tMin)) * plotW
+      ctx.beginPath()
+      ctx.moveTo(x, pad.top + plotH)
+      ctx.lineTo(x, pad.top + plotH + 5)
+      ctx.stroke()
+      ctx.textAlign = 'center'
+      ctx.fillText(t.toFixed(1), x, pad.top + plotH + 17)
+
+      ctx.save()
+      ctx.strokeStyle = '#334155'
+      ctx.setLineDash([2, 4])
+      ctx.beginPath()
+      ctx.moveTo(x, pad.top)
+      ctx.lineTo(x, pad.top + plotH)
+      ctx.stroke()
+      ctx.restore()
+    })
+
+    ctx.fillStyle   = '#cbd5e1'
+    ctx.font        = '12px sans-serif'
+    ctx.textAlign   = 'center'
+    ctx.fillText('Temperatura (°C)', pad.left + plotW / 2, height - 8)
+
+    // Eje Y (HR)
+    const hrTicks = [0, 20, 40, 60, 80, 100].filter(v => v >= hrMin && v <= hrMax)
+    ctx.beginPath()
+    ctx.strokeStyle = '#94a3b8'
+    ctx.moveTo(pad.left, pad.top)
+    ctx.lineTo(pad.left, pad.top + plotH)
+    ctx.stroke()
+
+    hrTicks.forEach(hr => {
+      const y = pad.top + plotH - ((hr - hrMin) / (hrMax - hrMin)) * plotH
+      ctx.beginPath()
+      ctx.moveTo(pad.left - 5, y)
+      ctx.lineTo(pad.left, y)
+      ctx.stroke()
+      ctx.fillStyle   = '#94a3b8'
+      ctx.font        = '11px monospace'
+      ctx.textAlign   = 'right'
+      ctx.fillText(hr, pad.left - 8, y + 4)
+
+      ctx.save()
+      ctx.strokeStyle = '#334155'
+      ctx.setLineDash([2, 4])
+      ctx.beginPath()
+      ctx.moveTo(pad.left, y)
+      ctx.lineTo(pad.left + plotW, y)
+      ctx.stroke()
+      ctx.restore()
+    })
+
+    ctx.save()
+    ctx.fillStyle = '#cbd5e1'
+    ctx.font      = '12px sans-serif'
+    ctx.translate(16, pad.top + plotH / 2)
+    ctx.rotate(-Math.PI / 2)
+    ctx.textAlign = 'center'
+    ctx.fillText('HR (%)', 0, 0)
+    ctx.restore()
+
+    // ── Colorbar ──
+    const cbX = pad.left + plotW + 12
+    const cbW = 14
+    const cbH = plotH
+    for (let cy = 0; cy < cbH; cy++) {
+      const t   = 1 - cy / (cbH - 1)
+      const [r, g, b] = viridisCmap(t)
+      ctx.fillStyle = `rgb(${r},${g},${b})`
+      ctx.fillRect(cbX, pad.top + cy, cbW, 1)
+    }
+
+    const cbTicks = [0, 0.002, 0.004, 0.006, 0.008]
+    const maxDisplay = maxVal
+    cbTicks.forEach((tv) => {
+      const t = tv / (maxDisplay * 1)
+      if (t > 1) return
+      const y = pad.top + cbH - t * cbH
+      ctx.fillStyle   = '#94a3b8'
+      ctx.font        = '10px monospace'
+      ctx.textAlign   = 'left'
+      ctx.fillText(tv.toFixed(4), cbX + cbW + 4, y + 3)
+    })
+
+    ctx.save()
+    ctx.fillStyle = '#cbd5e1'
+    ctx.font      = '11px sans-serif'
+    ctx.translate(width - 8, pad.top + plotH / 2)
+    ctx.rotate(-Math.PI / 2)
+    ctx.textAlign = 'center'
+    ctx.fillText('f(HR;T)', 0, 0)
+    ctx.restore()
+
+    // ── Líneas de referencia T=10, HR=79 ──
+    const refT10X = pad.left + ((10 - tMin) / (tMax - tMin)) * plotW
+    if (refT10X > pad.left && refT10X < pad.left + plotW) {
+      ctx.save()
+      ctx.strokeStyle = '#f97316'
+      ctx.setLineDash([6, 3])
+      ctx.lineWidth = 1.2
+      ctx.beginPath()
+      ctx.moveTo(refT10X, pad.top)
+      ctx.lineTo(refT10X, pad.top + plotH)
+      ctx.stroke()
+      ctx.fillStyle = '#f97316'
+      ctx.font      = '10px sans-serif'
+      ctx.textAlign = 'left'
+      ctx.fillText('T=10°C', refT10X + 3, pad.top + 12)
+      ctx.restore()
+    }
+
+    const refHR79Y = pad.top + plotH - ((79 - hrMin) / (hrMax - hrMin)) * plotH
+    if (refHR79Y > pad.top && refHR79Y < pad.top + plotH) {
+      ctx.save()
+      ctx.strokeStyle = '#f97316'
+      ctx.setLineDash([6, 3])
+      ctx.lineWidth = 1.2
+      ctx.beginPath()
+      ctx.moveTo(pad.left, refHR79Y)
+      ctx.lineTo(pad.left + plotW, refHR79Y)
+      ctx.stroke()
+      ctx.fillStyle = '#f97316'
+      ctx.font      = '10px sans-serif'
+      ctx.textAlign = 'right'
+      ctx.fillText('HR=79%', pad.left + plotW - 4, refHR79Y - 4)
+      ctx.restore()
+    }
+
+  }, [densityPoints, tMin, tMax, hrMin, hrMax, width, height])
+
+  return (
+    <canvas
+      ref={canvasRef}
+      style={{ display: 'block', width: '100%', borderRadius: 8 }}
+    />
+  )
+}
+
+// ══════════════════════════════════════════════════════════════
+// FDP ENRICHMENT
+// ══════════════════════════════════════════════════════════════
 function prepareFDPGaussian(fdp, gaussians, paso = 0.1) {
   if (!fdp?.length) return []
 
   const hasBackendComponents = fdp[0] && 'gauss1' in fdp[0]
 
   if (hasBackendComponents) {
-    // ── NUEVO: componentes ya calculadas por el backend con scipy ──
     return fdp.map(point => {
       const enriched = { ...point }
       enriched.sumaGauss = point.model != null ? parseFloat(point.model.toFixed(7)) : 0
-      // gaussN ya viene en el punto, solo asegurar formato
       if (gaussians?.length) {
         gaussians.forEach((_, i) => {
           const key = `gauss${i + 1}`
@@ -190,7 +449,6 @@ function prepareFDPGaussian(fdp, gaussians, paso = 0.1) {
     })
   }
 
-  // ── FALLBACK: recálculo JS para compatibilidad con backend antiguo ──
   return fdp.map(point => {
     const enriched = { ...point }
     enriched.sumaGauss = point.model != null ? parseFloat(point.model.toFixed(7)) : 0
@@ -205,23 +463,12 @@ function prepareFDPGaussian(fdp, gaussians, paso = 0.1) {
   })
 }
 
-/**
- * Prepara datos FDP Beta para el gráfico.
- * - sumaGauss (suma Beta): usa fdp[i].model (calculado por scipy en el backend)
- * - betaN: usa fdp[i].betaN si está disponible (backend nuevo)
- *          fallback: recalcula en JS (backend antiguo)
- *
- * FIX: el backend ahora incluye betaN en cada punto de fdp.
- * Esto garantiza que las curvas de componentes individuales sean
- * IDÉNTICAS a la curva suma, sin divergencia por reimplementación JS.
- */
 function prepareFDPBeta(fdp, betas) {
   if (!fdp?.length) return []
 
   const hasBackendComponents = fdp[0] && 'beta1' in fdp[0]
 
   if (hasBackendComponents) {
-    // ── NUEVO: componentes ya calculadas por el backend con scipy ──
     return fdp.map(point => {
       const enriched = { ...point }
       enriched.sumaGauss = point.model != null ? parseFloat(point.model.toFixed(7)) : 0
@@ -235,8 +482,6 @@ function prepareFDPBeta(fdp, betas) {
     })
   }
 
-  // ── FALLBACK: recálculo JS para compatibilidad con backend antiguo ──
-  // Solo se ejecuta si el backend no incluye betaN en los puntos.
   return fdp.map(point => {
     const enriched = { ...point }
     enriched.sumaGauss = point.model != null ? parseFloat(point.model.toFixed(7)) : 0
@@ -248,7 +493,6 @@ function prepareFDPBeta(fdp, betas) {
         if (width <= 0) { enriched[`beta${i + 1}`] = 0; return }
         const x01 = (point.x - A) / width
         if (x01 <= 0 || x01 >= 1) { enriched[`beta${i + 1}`] = 0; return }
-        // Usar logGamma numérico estable
         const val = _betaGenPDFjs(point.x, b.alpha, b.beta, A, B, b.w, 1.0)
         enriched[`beta${i + 1}`] = parseFloat(val.toFixed(7))
       })
@@ -257,7 +501,6 @@ function prepareFDPBeta(fdp, betas) {
   })
 }
 
-// ── Funciones matemáticas JS (solo usadas en fallback) ────────
 function _logGammaJS(z) {
   if (z <= 0) return Infinity
   if (z < 0.5) return Math.log(Math.PI / Math.sin(Math.PI * z)) - _logGammaJS(1 - z)
@@ -457,10 +700,6 @@ const GaussianCards = ({ gaussians, unit }) => (
   </div>
 )
 
-// FIX: BetaCards muestra variance (var_01, adimensional) y variance_hr (%²)
-// El backend ahora devuelve ambas:
-//   variance    = var_01 = α·β / ((α+β)²·(α+β+1))          [adimensional]
-//   variance_hr = var_01 × (B−A)²                            [en (%HR)²]
 const BetaCards = ({ betas }) => (
   <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 14 }}>
     {betas.map((b, i) => (
@@ -477,12 +716,10 @@ const BetaCards = ({ betas }) => (
           Soporte = <strong>[{b.A?.toFixed(0)}, {b.B?.toFixed(0)}]</strong>
         </div>
         <div style={{ fontSize: 12, color: '#f1f5f9' }}>Moda = <strong>{b.mode?.toFixed(2)}%</strong></div>
-        {/* FIX: mostrar var_01 (adimensional) — comparable con referencia Excel */}
         <div style={{ fontSize: 12, color: '#f1f5f9' }}>
           Var = <strong>{b.variance != null ? b.variance.toFixed(4) : '—'}</strong>
           <span style={{ fontSize: 10, color: '#64748b' }}> [0,1]</span>
         </div>
-        {/* Varianza en escala %HR² si está disponible */}
         {b.variance_hr != null && (
           <div style={{ fontSize: 11, color: '#64748b' }}>
             Var<sub>HR</sub> = {b.variance_hr.toFixed(2)}%²
@@ -528,8 +765,6 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
 
   const tPaso = tStats?.fdp_resolution ?? 0.1
 
-  // FIX: usar prepareFDPGaussian / prepareFDPBeta que priorizan
-  // los valores ya calculados por el backend (gauss1..N, beta1..N)
   const tFdp = tStats ? prepareFDPGaussian(tStats.fdp, tStats.gaussians ?? [], tPaso) : []
   const hFdp = hStats ? prepareFDPBeta(hStats.fdp, hStats.betas ?? []) : []
 
@@ -756,7 +991,6 @@ function SectionSummaryTable({ dateFrom, dateTo }) {
   const isHR = variable === 'HR'
   const nComponents = variable === 'TEMP' ? nComponentsT : nComponentsH
 
-  // FIX: columnas HR muestran Moda, Var [0,1], w (igual que BetaCards)
   const compHeaders = Array.from({ length: nComponents }, (_, i) =>
     isHR
       ? [`Moda${i+1}`, `Var${i+1}`, `w${i+1}`]
@@ -906,7 +1140,6 @@ function SectionSummaryTable({ dateFrom, dateTo }) {
             ))}
           </div>
 
-          {/* FIX: nota al pie explica que Var es la varianza interna [0,1] */}
           {isHR && (
             <div style={{ marginTop: 12, padding: '8px 12px', background: '#0f172a', borderRadius: 6, fontSize: 11, color: '#64748b', fontFamily: 'monospace' }}>
               Var = α·β / ((α+β)²·(α+β+1)) &nbsp;[adimensional, escala interna 0–1 de la distribución Beta]
@@ -1313,13 +1546,25 @@ function SectionAnnualProfile({ stationId, dateFrom, dateTo }) {
 }
 
 // ══════════════════════════════════════════════════════════════
-// SECTION D — T × HR combinado
+// SECTION D — T × HR combinado (versión mejorada con KDE canvas)
 // ══════════════════════════════════════════════════════════════
 function SectionCombined({ stationId, stationAlt, dateFrom, dateTo }) {
   const [data,    setData]    = useState(null)
   const [loading, setLoading] = useState(false)
   const [error,   setError]   = useState(null)
-  const [contour, setContour] = useState('all')
+  const [canvasW, setCanvasW] = useState(700)
+  const containerRef = useRef(null)
+
+  // Medir ancho real del contenedor para el canvas
+  useEffect(() => {
+    if (!containerRef.current) return
+    const ro = new ResizeObserver(entries => {
+      const w = entries[0]?.contentRect?.width
+      if (w > 0) setCanvasW(Math.floor(w))
+    })
+    ro.observe(containerRef.current)
+    return () => ro.disconnect()
+  }, [])
 
   const load = useCallback(async () => {
     if (!stationId) return
@@ -1342,80 +1587,55 @@ function SectionCombined({ stationId, stationAlt, dateFrom, dateTo }) {
   if (error)   return <Err msg={error} />
   if (!data)   return null
 
-  const filteredDensity = contour === 'all'
-    ? data.density
-    : data.density.filter(d => {
-        const lvl = parseInt(d.contour)
-        return !isNaN(lvl) && lvl <= parseInt(contour)
-      })
+  // Preparar puntos para el KDE
+  // Prioriza data.scatter (datos crudos horarios) sobre data.density (contornos)
+  const rawPoints = data.scatter?.length
+    ? data.scatter.map(d => ({ T: d.T, HR: d.HR, density: 1 }))
+    : data.density?.map(d => ({ T: d.T, HR: d.HR, density: 1 })) ?? []
 
-  const contourColor = (d) => {
-    if (d.contour === '90') return '#22c55e'
-    if (d.contour === '95') return '#f97316'
-    if (d.contour === '99') return '#6366f1'
-    return '#64748b'
-  }
+  // Rango automático con padding
+  const allT  = rawPoints.map(d => d.T)
+  const allHR = rawPoints.map(d => d.HR)
+  const tMin  = Math.floor(Math.min(...allT)  - 0.5)
+  const tMax  = Math.ceil( Math.max(...allT)  + 0.5)
+  const hrMin = Math.max(0,   Math.floor(Math.min(...allHR) - 2))
+  const hrMax = Math.min(100, Math.ceil( Math.max(...allHR) + 2))
 
   const mobilityT = data.mobility ?? []
 
   return (
     <>
-      {data.density.length > 0 && (
-        <SectionCard
-          title="d.1) Distribución T × HR"
-          subtitle={`Tiempo de humectación (T>10°C y HR>79%): ${data.humect_pct}% (${data.humect_count} registros)`}
-        >
-          <div style={{ display: 'flex', gap: 6, marginBottom: 14, flexWrap: 'wrap', alignItems: 'center' }}>
-            <span style={{ fontSize: 12, color: '#94a3b8', fontWeight: 600 }}>Mostrar:</span>
-            {[
-              { v: 'all', label: 'Todos',  color: '#64748b' },
-              { v: '99',  label: '99%',    color: '#6366f1' },
-              { v: '95',  label: '95%',    color: '#f97316' },
-              { v: '90',  label: '90%',    color: '#22c55e' },
-            ].map(({ v, label, color }) => (
-              <button key={v} onClick={() => setContour(v)} style={{
-                padding: '3px 12px', borderRadius: 20, border: `1px solid ${contour === v ? color : '#334155'}`,
-                fontSize: 12, cursor: 'pointer',
-                background: contour === v ? `${color}30` : 'transparent',
-                color:      contour === v ? color        : '#94a3b8',
-              }}>{label}</button>
-            ))}
-          </div>
+      {/* ── d.1) Densidad conjunta f(HR,T) — KDE canvas viridis ── */}
+      <SectionCard
+        title="d.1) Densidad conjunta f(HR,T)"
+        subtitle={`Tiempo de humectación (T>10°C y HR>79%): ${data.humect_pct}% (${data.humect_count} registros)`}
+      >
+        <div ref={containerRef} style={{ width: '100%' }}>
+          {rawPoints.length > 0 ? (
+            <KDEHeatmapCanvas
+              densityPoints={rawPoints}
+              tMin={tMin}
+              tMax={tMax}
+              hrMin={hrMin}
+              hrMax={hrMax}
+              width={canvasW}
+              height={Math.round(canvasW * 0.62)}
+            />
+          ) : (
+            <div style={{ color: '#64748b', textAlign: 'center', padding: '2rem' }}>
+              Sin datos de dispersión disponibles.
+            </div>
+          )}
+        </div>
 
-          <ResponsiveContainer width="100%" height={380}>
-            <ScatterChart margin={{ top: 8, right: 16, left: -10, bottom: 20 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
-              <XAxis dataKey="T"  name="Temperatura" unit="°C"  type="number" tick={{ fontSize: 10, fill: '#94a3b8' }}
-                label={{ value: 'T (°C)', position: 'insideBottom', offset: -8, fontSize: 11, fill: '#94a3b8' }} />
-              <YAxis dataKey="HR" name="Humedad"     unit="%" type="number" domain={[0,100]} tick={{ fontSize: 10, fill: '#94a3b8' }}
-                label={{ value: 'HR (%)', angle: -90, position: 'insideLeft', fontSize: 11, fill: '#94a3b8' }} />
-              <Tooltip cursor={{ strokeDasharray: '3 3' }}
-                contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }}
-                formatter={(v, n) => [typeof v === 'number' ? v.toFixed(2) : v, n]} />
-              <ReferenceLine x={10} stroke="#f97316" strokeDasharray="4 2"
-                label={{ value: 'T=10°C', fontSize: 9, fill: '#f97316' }} />
-              <ReferenceLine y={79} stroke="#f97316" strokeDasharray="4 2"
-                label={{ value: 'HR=79%', fontSize: 9, fill: '#f97316', position: 'insideTopRight' }} />
-              <Scatter data={filteredDensity} name="Densidad" fillOpacity={0.7}>
-                {filteredDensity.map((d, i) => (
-                  <Cell key={i} fill={contourColor(d)} />
-                ))}
-              </Scatter>
-            </ScatterChart>
-          </ResponsiveContainer>
+        <div style={{ display: 'flex', gap: 14, marginTop: 12, flexWrap: 'wrap', fontSize: 11, alignItems: 'center' }}>
+          <div style={{ flex: 1, height: 10, borderRadius: 4, background: 'linear-gradient(to right, #440154, #31688e, #35b779, #fde725)' }} />
+          <span style={{ color: '#64748b', minWidth: 120 }}>Menor densidad → Mayor densidad</span>
+        </div>
+      </SectionCard>
 
-          <div style={{ display: 'flex', gap: 14, marginTop: 8, flexWrap: 'wrap', fontSize: 11 }}>
-            {[['90', '#22c55e', '90% más denso'], ['95', '#f97316', '90–95%'], ['99', '#6366f1', '95–99%'], ['out', '#64748b', 'Fuera del 99%']].map(([lvl, col, lbl]) => (
-              <span key={lvl} style={{ display: 'flex', alignItems: 'center', gap: 4, color: '#94a3b8' }}>
-                <span style={{ width: 10, height: 10, borderRadius: 2, background: col, display: 'inline-block' }} />
-                {lbl}
-              </span>
-            ))}
-          </div>
-        </SectionCard>
-      )}
-
-      {data.habs_monthly.length > 0 && (
+      {/* ── d.2) Humedad Absoluta mensual ── */}
+      {data.habs_monthly?.length > 0 && (
         <SectionCard title="d.2) Humedad Absoluta mensual" subtitle={`Altitud: ${stationAlt || 0} m s.n.m.`}>
           <div style={{ marginBottom: 10, fontSize: 11, color: '#64748b', fontFamily: 'monospace' }}>
             H_abs = (18000/29) × (HR/100 × P_sat) / (P_tot − HR/100 × P_sat)
@@ -1438,7 +1658,8 @@ function SectionCombined({ stationId, stationAlt, dateFrom, dateTo }) {
         </SectionCard>
       )}
 
-      {data.scatter.length > 0 && (
+      {/* ── d.3) Gráfico psicrométrico ── */}
+      {data.scatter?.length > 0 && (
         <SectionCard title="d.3) Gráfico psicrométrico (T vs H abs)">
           <ResponsiveContainer width="100%" height={320}>
             <ScatterChart margin={{ top: 8, right: 16, left: 0, bottom: 20 }}>
@@ -1455,6 +1676,7 @@ function SectionCombined({ stationId, stationAlt, dateFrom, dateTo }) {
         </SectionCard>
       )}
 
+      {/* ── d.4) Movilidad del flujo T × HR ── */}
       {mobilityT.length > 0 && (
         <SectionCard
           title="d.4) Movilidad del flujo T × HR durante el año"
@@ -1467,16 +1689,16 @@ function SectionCombined({ stationId, stationAlt, dateFrom, dateTo }) {
               matT [mes-1][hora] = T_avg
               matHR[mes-1][hora] = HR_avg
             })
-            const allT  = mobilityT.map(d => d.T_avg)
-            const allHR = mobilityT.map(d => d.HR_avg)
-            const tMin = Math.min(...allT),  tMax = Math.max(...allT)
-            const hMin = Math.min(...allHR), hMax = Math.max(...allHR)
+            const allTm  = mobilityT.map(d => d.T_avg)
+            const allHRm = mobilityT.map(d => d.HR_avg)
+            const tMinM = Math.min(...allTm),  tMaxM = Math.max(...allTm)
+            const hMinM = Math.min(...allHRm), hMaxM = Math.max(...allHRm)
 
             return (
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
                 {[
-                  { label: 'T promedio (°C)', mat: matT,  min: tMin, max: tMax, type: 'TEMP', unit: '°C' },
-                  { label: 'HR promedio (%)', mat: matHR, min: hMin, max: hMax, type: 'HR',   unit: '%'  },
+                  { label: 'T promedio (°C)', mat: matT,  min: tMinM, max: tMaxM, type: 'TEMP', unit: '°C' },
+                  { label: 'HR promedio (%)', mat: matHR, min: hMinM, max: hMaxM, type: 'HR',   unit: '%'  },
                 ].map(({ label, mat, min, max, type, unit }) => (
                   <div key={label}>
                     <div style={{ fontSize: 12, color: '#94a3b8', marginBottom: 6, fontWeight: 600 }}>{label}</div>
