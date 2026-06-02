@@ -19,7 +19,7 @@ const TABS = [
   { id: 'annual-profile', label: 'c.3) Perfil anual'          },
   { id: 'combined',       label: 'd) T × HR combinado'        },
 ]
-
+//xd
 const fmt = (s) => {
   if (!s) return ''
   const d = new Date(s)
