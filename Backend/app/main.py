@@ -3,12 +3,17 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import traceback
 
+from app.db.database import engine, Base
+import app.db.db  # noqa: F401 — registra todos los modelos
 from app.api.api import api_router
 
 app = FastAPI(
     title="Meteorological API",
     version="1.0.0"
 )
+
+# Crear tablas al arrancar
+Base.metadata.create_all(bind=engine)
 
 app.add_middleware(
     CORSMiddleware,

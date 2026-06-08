@@ -146,11 +146,10 @@ async def upload_file(
     file_id = str(uploaded.id)
 
 
-    # ─────────────────────────────────────────────────────────
+  # ─────────────────────────────────────────────────────────
     # 5. INSERTAR MEDICIONES
     # ─────────────────────────────────────────────────────────
     try:
-
         rows_inserted = insert_measurements(
             db=db,
             df=df,
@@ -159,27 +158,41 @@ async def upload_file(
             file_id=file_id,
         )
 
-        # Actualizar estado
         uploaded.status = "processed"
         uploaded.rows_imported = rows_inserted
-
         db.commit()
 
     except Exception as e:
-
         uploaded.status = f"error: {str(e)}"
         db.commit()
 
         raise HTTPException(
             status_code=500,
             detail={
-                "message":
-                    "Error al insertar mediciones",
-
-                "error":
-                    str(e),
+                "message": "Error al insertar mediciones",
+                "error":   str(e),
             }
         )
+
+    # ─────────────────────────────────────────────────────────
+    # 5b. CALCULAR ANALYTICS (separado del try anterior)
+    # ─────────────────────────────────────────────────────────
+    try:
+        from app.services.analytics_service import run_analytics
+        analytics_result = run_analytics(
+            db=db,
+            station_id=station_id,
+            variable_id=variable_id,
+            variable_code=VTYPE_TO_CODE.get(vtype_detected, ""),
+        )
+        logs += analytics_result.get("logs", [])
+
+        upsert_summary_stats(db=db, station_id=station_id, variable_id=variable_id)
+        logs.append("✅ Summary stats actualizados")
+        
+    except Exception as e:
+        db.rollback()
+        logs.append(f"⚠️ Analytics falló pero el archivo se subió: {str(e)}")
 
 
     # ─────────────────────────────────────────────────────────

@@ -31,11 +31,13 @@ from fastapi import (
 from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlalchemy.orm import Session
+from app.models.summary_stats import SummaryStats
 
 from app.db.database import get_db
 from app.models.measurement import Measurement
 from app.models.station import Station
 from app.models.variable import Variable
+
 
 router = APIRouter()
 
@@ -707,56 +709,27 @@ def list_measurements(
 def get_summary(
     station_id:    Optional[str] = Query(None),
     variable_code: Optional[str] = Query(None),
-    date_from:     Optional[str] = Query(None),
-    date_to:       Optional[str] = Query(None),
     db: Session = Depends(get_db),
 ):
     q = (
         db.query(
-            Station.station_code.label("station_code"),
-            Station.name.label("station_name"),
+            Station.station_code, Station.name.label("station_name"),
             Variable.code.label("variable_code"),
-            Variable.name.label("variable_name"),
-            Variable.unit.label("unit"),
-            func.count(Measurement.id).label("count"),
-            func.min(Measurement.value).label("min"),
-            func.max(Measurement.value).label("max"),
-            func.avg(Measurement.value).label("avg"),
-            func.min(Measurement.measured_at).label("date_start"),
-            func.max(Measurement.measured_at).label("date_end"),
+            Variable.name.label("variable_name"), Variable.unit,
+            SummaryStats.count, SummaryStats.min_value,
+            SummaryStats.max_value, SummaryStats.avg_value,
+            SummaryStats.date_start, SummaryStats.date_end,
         )
-        .join(Station,  Measurement.station_id  == Station.id)
-        .join(Variable, Measurement.variable_id == Variable.id)
+        .join(Station,  SummaryStats.station_id  == Station.id)
+        .join(Variable, SummaryStats.variable_id == Variable.id)
     )
-
-    if station_id:    q = q.filter(Measurement.station_id == station_id)
-    if variable_code: q = q.filter(func.upper(Variable.code) == variable_code.strip().upper())
-
-    q = _apply_date_filters(q, date_from, date_to)
-
-    q = q.group_by(
-        Station.station_code, Station.name,
-        Variable.code, Variable.name, Variable.unit,
-    ).order_by(Station.station_code, Variable.code)
-
+    if station_id:    q = q.filter(SummaryStats.station_id == station_id)
+    if variable_code: q = q.filter(
+        func.upper(Variable.code) == variable_code.strip().upper()
+    )
+    # Sin date_from/date_to — si los necesitas, usar daily_stats
     rows = q.all()
-
-    return [
-        {
-            "station_code":  r.station_code,
-            "station_name":  r.station_name,
-            "variable_code": r.variable_code,
-            "variable_name": r.variable_name,
-            "unit":          r.unit,
-            "count":         r.count,
-            "min":           round(float(r.min), 4) if r.min  is not None else None,
-            "max":           round(float(r.max), 4) if r.max  is not None else None,
-            "avg":           round(float(r.avg), 4) if r.avg  is not None else None,
-            "date_start":    str(r.date_start)       if r.date_start else None,
-            "date_end":      str(r.date_end)         if r.date_end   else None,
-        }
-        for r in rows
-    ]
+    ...
 
 
 # ═════════════════════════════════════════════════════════════
@@ -829,145 +802,85 @@ def get_stats(
                                          description="Número de componentes gaussianas/beta"),
     db: Session = Depends(get_db),
 ):
-    import numpy as np
+    import json
+    from app.models.distribution_analysis import DistributionAnalysis
 
-    q = (
-        db.query(Measurement)
-        .join(Measurement.variable)
-        .filter(Measurement.station_id == station_id)
-        .filter(func.upper(Variable.code) == variable_code.strip().upper())
+    vc    = variable_code.strip().upper()
+    is_hr = vc == "HR"
+
+    variable = db.query(Variable).filter(
+        func.upper(Variable.code) == vc
+    ).first()
+
+    if not variable:
+        raise HTTPException(status_code=404, detail=f"Variable '{vc}' no encontrada")
+
+    dist_type   = "beta" if is_hr else "gaussian"
+    dist_record = (
+        db.query(DistributionAnalysis)
+        .filter(
+            DistributionAnalysis.station_id        == station_id,
+            DistributionAnalysis.variable_id       == str(variable.id),
+            DistributionAnalysis.distribution_type == dist_type,
+        )
+        .order_by(DistributionAnalysis.calculated_at.desc())
+        .first()
     )
-    q = _apply_date_filters(q, date_from, date_to)
-    rows = q.order_by(Measurement.measured_at.asc()).all()
 
-    if not rows:
-        raise HTTPException(status_code=404, detail="Sin datos para los filtros indicados")
+    # ── Servir 100% desde precalculado ───────────────────────
+    if (dist_record
+            and dist_record.components_json
+            and dist_record.fdp_json
+            and dist_record.n_records is not None):
 
-    values = np.array([float(r.value) for r in rows])
-    values = values[~np.isnan(values)]
-
-    if len(values) == 0:
-        raise HTTPException(status_code=404, detail="Sin valores válidos")
-
-    is_hr   = variable_code.strip().upper() == "HR"
-    is_temp = variable_code.strip().upper() == "TEMP"
-
-    # ── Estadísticos ──────────────────────────────────────────
-    n    = len(values)
-    mean = float(np.mean(values))
-    std  = float(np.std(values))
-    mn   = float(np.min(values))
-    mx   = float(np.max(values))
-    q25  = float(np.percentile(values, 25))
-    q50  = float(np.percentile(values, 50))
-    q75  = float(np.percentile(values, 75))
-
-    step = 0.1 if is_temp else 1.0
-    bins_mode = np.round(values / step) * step
-    unique, counts = np.unique(bins_mode, return_counts=True)
-    mode = float(unique[np.argmax(counts)])
-
-    anomaly_threshold = 3 * std
-    anomalies_count   = int(np.sum(np.abs(values - mean) > anomaly_threshold))
-    anomaly_values    = [
-        round(float(v), 4)
-        for v in values
-        if abs(v - mean) > anomaly_threshold
-    ]
-
-    # ── FDP como fracción simple ──────────────────────────────
-    paso = 0.1 if is_temp else 1.0
-    fdp  = _build_fdp(values, paso)
-
-    # ── Completitud ───────────────────────────────────────────
-    date_start    = rows[0].measured_at
-    date_end      = rows[-1].measured_at
-    horas_totales = max(int((date_end - date_start).total_seconds() / 3600) + 1, 1)
-    completitud   = round(n / horas_totales * 100, 2)
-    completitud_color = _completitud_color(completitud)
-
-    # ═══════════════════════════════════════════════════════════
-    # RAMA HR — ajuste Beta generalizada
-    # ═══════════════════════════════════════════════════════════
-    if is_hr:
-        betas, r2, mse, fdp_fitted = ([], None, None, fdp) if len(fdp) <= 4 else \
-            _fit_beta_components(fdp, n_components=n_components)
-
-        w_sum = round(sum(b["w"] for b in betas), 4)
-        w_ok  = abs(w_sum - 1.0) < 0.01
-
-        quality = _quality_flags(mse, r2, fdp_fitted)
+        components = json.loads(dist_record.components_json)
+        fdp_fitted = json.loads(dist_record.fdp_json)
+        anomalies  = json.loads(dist_record.anomalies_json or "[]")
+        r2         = dist_record.r2
+        mse        = dist_record.mse
+        quality    = _quality_flags(mse, r2, fdp_fitted)
+        w_sum      = round(sum(c.get("w", 0) for c in components), 4)
         quality["weights_sum"]    = w_sum
-        quality["weights_sum_ok"] = w_ok
+        quality["weights_sum_ok"] = abs(w_sum - 1.0) < 0.01
+
+        gaussians = components if not is_hr else []
+        betas     = components if is_hr     else []
 
         return {
-            "n":                  n,
-            "mean":               round(mean, 4),
-            "std":                round(std,  4),
-            "min":                round(mn,   4),
-            "max":                round(mx,   4),
-            "q25":                round(q25,  4),
-            "q50":                round(q50,  4),
-            "q75":                round(q75,  4),
-            "mode":               round(mode, 4),
-            "completitud_pct":    completitud,
-            "completitud_color":  completitud_color,
-            "anomalies_count":    anomalies_count,
-            "anomaly_values":     anomaly_values[:50],
-            "anomaly_threshold":  round(anomaly_threshold, 4),
-            "date_start":         str(date_start),
-            "date_end":           str(date_end),
-            "distribution":       "beta",
-            "n_components":       n_components,
-            "fdp_resolution":     paso,
-            "fdp":                fdp_fitted,   # incluye betaN por punto
+            "n":                  int(dist_record.n_records),
+            "mean":               dist_record.mean_val,
+            "std":                dist_record.std_val,
+            "min":                dist_record.min_val,
+            "max":                dist_record.max_val,
+            "q25":                dist_record.q25_val,
+            "q50":                dist_record.q50_val,
+            "q75":                dist_record.q75_val,
+            "mode":               dist_record.mode_val,
+            "completitud_pct":    dist_record.completitud_pct,
+            "completitud_color":  _completitud_color(dist_record.completitud_pct or 0),
+            "anomalies_count":    len(anomalies),
+            "anomaly_values":     anomalies,
+            "anomaly_threshold":  dist_record.anomaly_threshold,
+            "date_start":         str(dist_record.date_start),
+            "date_end":           str(dist_record.date_end),
+            "distribution":       dist_type,
+            "n_components":       len(components),
+            "fdp_resolution":     1.0 if is_hr else 0.1,
+            "fdp":                fdp_fitted,
+            "gaussians":          gaussians,
             "betas":              betas,
-            "gaussians":          [],
             "r2":                 r2,
             "mse":                mse,
             "quality":            quality,
+            "source":             "precalculado",
         }
 
-    # ═══════════════════════════════════════════════════════════
-    # RAMA TEMP — ajuste Gaussiano
-    # ═══════════════════════════════════════════════════════════
-    gaussians, r2, mse, fdp_fitted = ([], None, None, fdp) if len(fdp) <= 4 else \
-        _fit_gaussian_components(fdp, n_components=n_components)
+    # ── Fallback si no hay precalculado ───────────────────────
+    raise HTTPException(
+        status_code=404,
+        detail="Sin datos precalculados. Sube un archivo CSV primero."
+    )
 
-    w_sum = round(sum(g["w"] for g in gaussians), 4)
-    w_ok  = abs(w_sum - 1.0) < 0.01
-
-    quality = _quality_flags(mse, r2, fdp_fitted)
-    quality["weights_sum"]    = w_sum
-    quality["weights_sum_ok"] = w_ok
-
-    return {
-        "n":                  n,
-        "mean":               round(mean, 4),
-        "std":                round(std,  4),
-        "min":                round(mn,   4),
-        "max":                round(mx,   4),
-        "q25":                round(q25,  4),
-        "q50":                round(q50,  4),
-        "q75":                round(q75,  4),
-        "mode":               round(mode, 4),
-        "completitud_pct":    completitud,
-        "completitud_color":  completitud_color,
-        "anomalies_count":    anomalies_count,
-        "anomaly_values":     anomaly_values[:50],
-        "anomaly_threshold":  round(anomaly_threshold, 4),
-        "date_start":         str(date_start),
-        "date_end":           str(date_end),
-        "distribution":       "gaussian",
-        "n_components":       n_components,
-        "fdp_resolution":     paso,
-        "fdp":                fdp_fitted,   # incluye gaussN por punto
-        "gaussians":          gaussians,
-        "betas":              [],
-        "r2":                 r2,
-        "mse":                mse,
-        "quality":            quality,
-    }
 
 
 # ═════════════════════════════════════════════════════════════
@@ -1076,13 +989,57 @@ def get_heatmap(
     date_to:       Optional[str] = Query(None),
     db: Session = Depends(get_db),
 ):
+    from app.models.heatmap_stats import HeatmapStats
+    from app.models.variable import Variable
+
+    vc = variable_code.strip().upper()
+
+    # Buscar variable_id por código
+    variable = db.query(Variable).filter(
+        func.upper(Variable.code) == vc
+    ).first()
+
+    if not variable:
+        raise HTTPException(status_code=404, detail=f"Variable '{vc}' no encontrada")
+
+    # ── Leer desde heatmap_stats (precalculado) ──────────────
+    # group_by="week" no está en heatmap_stats, en ese caso
+    # caemos al cálculo original desde measurements
+    if group_by == "hour":
+        rows = (
+            db.query(HeatmapStats)
+            .filter(
+                HeatmapStats.station_id  == station_id,
+                HeatmapStats.variable_id == str(variable.id),
+            )
+            .order_by(HeatmapStats.month, HeatmapStats.hour)
+            .all()
+        )
+
+        if rows:
+            matrix = [
+                {"mes": r.month, "hora": r.hour, "avg": r.avg_value}
+                for r in rows
+            ]
+            all_vals = [r.avg_value for r in rows if r.avg_value is not None]
+            return {
+                "matrix":    matrix,
+                "eje_label": "hora",
+                "eje_range": list(range(0, 24)),
+                "group_by":  "hour",
+                "min":       round(min(all_vals), 2) if all_vals else None,
+                "max":       round(max(all_vals), 2) if all_vals else None,
+                "source":    "precalculado",
+            }
+
+    # ── Fallback: cálculo original para group_by="week" ──────
     import pandas as pd
 
     q = (
         db.query(Measurement)
         .join(Measurement.variable)
         .filter(Measurement.station_id == station_id)
-        .filter(func.upper(Variable.code) == variable_code.strip().upper())
+        .filter(func.upper(Variable.code) == vc)
     )
     q = _apply_date_filters(q, date_from, date_to)
     rows = q.all()
@@ -1096,31 +1053,24 @@ def get_heatmap(
     ])
     df["measured_at"] = pd.to_datetime(df["measured_at"])
     df["mes"] = df["measured_at"].dt.month
-
-    if group_by == "week":
-        df["eje"] = ((df["measured_at"].dt.day - 1) // 7 + 1)
-        eje_label = "semana_mes"
-        eje_range = list(range(1, 6))
-    else:
-        df["eje"] = df["measured_at"].dt.hour
-        eje_label = "hora"
-        eje_range = list(range(0, 24))
+    df["eje"] = ((df["measured_at"].dt.day - 1) // 7 + 1)
 
     matrix = (
         df.groupby(["mes", "eje"])["value"]
         .mean().round(2).reset_index()
-        .rename(columns={"value": "avg", "eje": eje_label})
+        .rename(columns={"value": "avg", "eje": "semana_mes"})
         .to_dict(orient="records")
     )
 
     all_vals = df["value"].dropna()
     return {
         "matrix":    matrix,
-        "eje_label": eje_label,
-        "eje_range": eje_range,
-        "group_by":  group_by,
+        "eje_label": "semana_mes",
+        "eje_range": list(range(1, 6)),
+        "group_by":  "week",
         "min":       round(float(all_vals.min()), 2),
         "max":       round(float(all_vals.max()), 2),
+        "source":    "calculado",
     }
 
 
@@ -1136,67 +1086,84 @@ def get_daily_profile(
     date_to:       Optional[str] = Query(None),
     db: Session = Depends(get_db),
 ):
-    import numpy as np
-    import pandas as pd
+    from app.models.heatmap_stats import HeatmapStats
 
-    q = (
-        db.query(Measurement)
-        .join(Measurement.variable)
-        .filter(Measurement.station_id == station_id)
-        .filter(func.upper(Variable.code) == variable_code.strip().upper())
+    vc    = variable_code.strip().upper()
+    is_hr = vc == "HR"
+
+    variable = db.query(Variable).filter(
+        func.upper(Variable.code) == vc
+    ).first()
+
+    if not variable:
+        raise HTTPException(status_code=404, detail=f"Variable '{vc}' no encontrada")
+
+    # ── Leer desde heatmap_stats ──────────────────────────────
+    # heatmap_stats tiene mes×hora con avg, lo que es exactamente
+    # el perfil diario por mes que este endpoint calculaba con Pandas
+    rows = (
+        db.query(HeatmapStats)
+        .filter(
+            HeatmapStats.station_id  == station_id,
+            HeatmapStats.variable_id == str(variable.id),
+        )
+        .order_by(HeatmapStats.month, HeatmapStats.hour)
+        .all()
     )
-    q = _apply_date_filters(q, date_from, date_to)
-    rows = q.order_by(Measurement.measured_at.asc()).all()
 
     if not rows:
-        raise HTTPException(status_code=404, detail="Sin datos para los filtros indicados")
+        raise HTTPException(status_code=404, detail="Sin datos precalculados. Sube un archivo primero.")
 
-    is_hr = variable_code.strip().upper() == "HR"
-    step  = 1.0 if is_hr else 0.1
+    # Construir perfil anual (promedio de todos los meses por hora)
+    from collections import defaultdict
+    import numpy as np
 
-    df = pd.DataFrame([
-        {"measured_at": r.measured_at, "value": float(r.value)}
-        for r in rows
-    ])
-    df["measured_at"] = pd.to_datetime(df["measured_at"])
-    df["mes"]  = df["measured_at"].dt.month
-    df["hora"] = df["measured_at"].dt.hour
+    hour_vals = defaultdict(list)
+    monthly: dict[str, list] = {}
 
-    def _mode(series):
-        vals = series.dropna()
-        if len(vals) == 0:
-            return None
-        bins = np.round(vals.values / step) * step
-        u, c = np.unique(bins, return_counts=True)
-        return round(float(u[np.argmax(c)]), 2)
+    for r in rows:
+        hour_vals[r.hour].append(r.avg_value)
+        m = str(r.month)
+        if m not in monthly:
+            monthly[m] = [{"hora": h, "avg": None} for h in range(24)]
+        monthly[m][r.hour] = {
+            "hora": r.hour,
+            "avg":  round(r.avg_value, 3) if r.avg_value is not None else None,
+            "min":  None,
+            "max":  None,
+            "mode": None,
+            "q25":  None,
+            "q75":  None,
+        }
 
-    def _profile(subset: pd.DataFrame) -> list[dict]:
-        result = []
-        for h in range(24):
-            grp = subset[subset["hora"] == h]["value"]
-            if len(grp) == 0:
-                result.append({"hora": h, "avg": None, "min": None,
-                                "max": None, "mode": None, "q25": None, "q75": None})
-                continue
-            result.append({
-                "hora": h,
-                "avg":  round(float(grp.mean()),         3),
-                "min":  round(float(grp.min()),          3),
-                "max":  round(float(grp.max()),          3),
-                "mode": _mode(grp),
-                "q25":  round(float(grp.quantile(0.25)), 3),
-                "q75":  round(float(grp.quantile(0.75)), 3),
-            })
-        return result
+    annual = [
+        {
+            "hora": h,
+            "avg":  round(float(np.mean(hour_vals[h])), 3) if hour_vals[h] else None,
+            "min":  None,
+            "max":  None,
+            "mode": None,
+            "q25":  None,
+            "q75":  None,
+        }
+        for h in range(24)
+    ]
 
-    annual  = _profile(df)
-    monthly = {str(m): _profile(df[df["mes"] == m]) for m in range(1, 13)}
+    # Rellenar meses faltantes con None
+    for m in range(1, 13):
+        if str(m) not in monthly:
+            monthly[str(m)] = [
+                {"hora": h, "avg": None, "min": None,
+                 "max": None, "mode": None, "q25": None, "q75": None}
+                for h in range(24)
+            ]
 
     return {
-        "variable_code": variable_code.strip().upper(),
+        "variable_code": vc,
         "is_hr":         is_hr,
         "annual":        annual,
         "monthly":       monthly,
+        "source":        "precalculado",
     }
 
 

@@ -93,7 +93,7 @@ const SectionCard = ({ title, subtitle, children, badge }) => (
     <div style={{ marginBottom: 14, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 8 }}>
       <div>
         <h3 style={{ margin: 0, fontSize: 14, fontWeight: 700, color: '#f1f5f9' }}>{title}</h3>
-        {subtitle && <p style={{ margin: '4px 0 0', fontSize: 12, color: '#94a3b8' }}>{subtitle}</p>}
+        {subtitle && <div style={{ margin: '4px 0 0', fontSize: 12, color: '#94a3b8' }}>{subtitle}</div>}
       </div>
       {badge}
     </div>

@@ -4,3 +4,7 @@ from app.models.station import Station        # noqa: F401
 from app.models.variable import Variable      # noqa: F401
 from app.models.uploaded_file import UploadedFile  # noqa: F401
 from app.models.measurement import Measurement     # noqa: F401
+from app.models.daily_stats import DailyStats
+from app.models.monthly_stats import MonthlyStats
+from app.models.heatmap_stats import HeatmapStats
+from app.models.distribution_analysis import DistributionAnalysis
