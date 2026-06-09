@@ -22,6 +22,7 @@ import numpy as np
 
 HOUR_COLS_B     = [f"{i:02d}:00" for i in range(1, 25)]          # 01:00…24:00
 HOUR_COLS_B_ALT = [f"{i}:00" for i in range(1, 25)] + ["24:00:00"]  # 1:00…24:00
+HOUR_COLS_B_EXT = HOUR_COLS_B + ["24:00:00"]                     # 01:00…24:00 + 24:00:00
 
 
 def _norm(txt: str) -> str:
@@ -49,12 +50,12 @@ def _detect_hour_cols(df: pd.DataFrame):
         found_a.sort(key=lambda c: int(str(c).upper().replace("H", "")))
         return found_a, "A"
 
-    # Formato B: 01:00…24:00
-    all_b = set(HOUR_COLS_B)
+    # Formato B: 01:00…24:00 (o 24:00:00)
+    all_b = set(HOUR_COLS_B_EXT)
     found_b = [c for c, v in cols.items() if v in all_b]
     if len(found_b) >= 12:
         def _sk(c):
-            v = str(c).replace(":00","")
+            v = str(c).replace(":00:00","").replace(":00","")
             try: return int(v)
             except: return 99
         found_b.sort(key=_sk)
@@ -153,21 +154,30 @@ def _detect_formato_c(raw_lines: list[str], sep: str) -> bool:
     return _norm(raw_lines[0].split(sep)[0]) in ["estacion:", "estacion"]
 
 
+def _find_csv_sep(raw_text: str) -> str | None:
+    """Detecta si el CSV usa ; o \\t como separador."""
+    head = raw_text.splitlines()[:5]
+    for sep in ["\t", ";"]:
+        if any(len(row.split(sep)) >= 20 for row in head if row.strip()):
+            return sep
+    return None
+
+
 def _parse_formato_c(
     file_bytes: bytes,
     filename:   str,
     enc:        str,
     logs:       list[str],
+    sep:        str = ";",
 ) -> tuple[pd.DataFrame, str, list[str]]:
     """
     Formato C — archivo con 4 filas de metadata:
-      Fila 0: Estacion:;NOMBRE…
+      Fila 0: Estacion:<sep>NOMBRE…
       Fila 1: vacía
-      Fila 2: ;;Fecha;;;Temperatura (°C)… / Humedad Relativa (%)…
-      Fila 3: Control de fecha;;Año;Mes;Día;1:00;2:00;…;24:00
-      Fila 4+: datos  (dd/mm/yyyy;;YYYY;MM;DD;val;val;…)
+      Fila 2: <sep><sep>Fecha<sep><sep><sep>Temperatura (°C)… / Humedad Relativa (%)…
+      Fila 3: Control de fecha<sep><sep>Año<sep>Mes<sep>Día<sep>1:00<sep>2:00<sep>…<sep>24:00
+      Fila 4+: datos  (dd/mm/yyyy<sep><sep>YYYY<sep>MM<sep>DD<sep>val<sep>val<sep>…)
     """
-    sep = ";"
 
     # ── Leer texto crudo para detectar variable en fila 2 ──
     raw_text = file_bytes.decode(enc, errors="replace")
@@ -306,24 +316,30 @@ def _parse_csv(
     logs:       list[str],
 ) -> tuple[pd.DataFrame, str, list[str]]:
 
-    for enc in ["latin1", "utf-8", "cp1252"]:
+    for enc in ["utf-8", "latin1", "cp1252"]:
         try:
             raw_text  = file_bytes.decode(enc, errors="replace")
             raw_lines = raw_text.splitlines()
+            csv_sep   = _find_csv_sep(raw_text) or ";"
 
             # ── Formato C: metadata en filas 0-3 ─────────────────
-            if _detect_formato_c(raw_lines, ";"):
-                return _parse_formato_c(file_bytes, filename, enc, logs)
+            if _detect_formato_c(raw_lines, csv_sep):
+                df_c, vtype_c, _ = _parse_formato_c(file_bytes, filename, enc, [], sep=csv_sep)
+                if not df_c.empty:
+                    logs.append(f"✅ {filename} → {vtype_c} ({len(df_c):,} registros, Formato C)")
+                    return df_c, vtype_c, logs
+                logs.append(f"⚠️ {filename} enc={enc}: Formato C detectado pero _wide_to_long devolvió vacío, probando otra codificación...")
+                continue
 
             # ── Leer fila 0 para detectar variable (formatos A/B) ─
             row0_text = raw_lines[0] if raw_lines else ""
             vtype = _detect_variable(row0_text, filename)
 
             # ── Intentar formatos anchos A y B ────────────────────
-            df_b = _try_read_csv(file_bytes, enc, ";", 1)
+            df_b = _try_read_csv(file_bytes, enc, csv_sep, 1)
             _, fmt_b = _detect_hour_cols(df_b) if not df_b.empty else ([], "UNKNOWN")
 
-            df_a = _try_read_csv(file_bytes, enc, ";", 0)
+            df_a = _try_read_csv(file_bytes, enc, csv_sep, 0)
             _, fmt_a = _detect_hour_cols(df_a) if not df_a.empty else ([], "UNKNOWN")
 
             if fmt_b in ("A", "B", "C"):
@@ -335,7 +351,7 @@ def _parse_csv(
                         " ".join(str(c) for c in df_a.columns), filename)
             else:
                 # ── Fallback: formato largo ───────────────────────
-                for sep in [";", ","]:
+                for sep in [";", ",", "\t"]:
                     df_long = _try_read_csv(file_bytes, enc, sep, 0)
                     if df_long.empty or len(df_long.columns) <= 1:
                         continue

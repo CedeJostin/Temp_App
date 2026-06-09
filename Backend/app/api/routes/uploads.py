@@ -73,6 +73,8 @@ async def upload_file(
     # ─────────────────────────────────────────────────────────
     df, vtype_detected, logs = parse_file(contents, filename)
 
+    logs.append(f"📄 Archivo parseado: {len(df)} registros, tipo detectado: {vtype_detected}")
+
     if df.empty:
         raise HTTPException(
             status_code=422,
@@ -178,7 +180,7 @@ async def upload_file(
     # 5b. CALCULAR ANALYTICS (separado del try anterior)
     # ─────────────────────────────────────────────────────────
     try:
-        from app.services.analytics_service import run_analytics
+        from app.services.analytics_service import run_analytics, upsert_summary_stats
         analytics_result = run_analytics(
             db=db,
             station_id=station_id,
@@ -186,15 +188,31 @@ async def upload_file(
             variable_code=VTYPE_TO_CODE.get(vtype_detected, ""),
         )
         logs += analytics_result.get("logs", [])
-
+ 
         upsert_summary_stats(db=db, station_id=station_id, variable_id=variable_id)
         logs.append("✅ Summary stats actualizados")
-        
+ 
     except Exception as e:
         db.rollback()
         logs.append(f"⚠️ Analytics falló pero el archivo se subió: {str(e)}")
-
-
+ 
+    # ── NUEVO: precalcular by_date, annual_profile y combined ──
+    try:
+        from app.services.stats_service import recalculate_derived_stats
+        derived = recalculate_derived_stats(
+            db=db,
+            station_id=station_id,
+            variable_id=variable_id,
+            variable_code=VTYPE_TO_CODE.get(vtype_detected, ""),
+            # altitude se toma internamente de la tabla stations
+        )
+        logs += derived.get("logs", [])
+ 
+    except Exception as e:
+        db.rollback()
+        logs.append(f"⚠️ Estadísticas derivadas fallaron: {str(e)}")
+    # ── FIN NUEVO ──────────────────────────────────────────────
+ 
     # ─────────────────────────────────────────────────────────
     # 6. RESPUESTA
     # ─────────────────────────────────────────────────────────

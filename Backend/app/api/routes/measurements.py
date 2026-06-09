@@ -21,6 +21,7 @@ Endpoints disponibles:
 
 from datetime import datetime
 from typing import Optional
+import json
 
 from fastapi import (
     APIRouter,
@@ -31,6 +32,7 @@ from fastapi import (
 from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 from app.models.summary_stats import SummaryStats
 
 from app.db.database import get_db
@@ -729,7 +731,23 @@ def get_summary(
     )
     # Sin date_from/date_to — si los necesitas, usar daily_stats
     rows = q.all()
-    ...
+
+    return [
+        {
+            "station_code":   r.station_code,
+            "station_name":   r.station_name,
+            "variable_code":  r.variable_code,
+            "variable_name":  r.variable_name,
+            "unit":           r.unit,
+            "count":          r.count,
+            "min_value":      float(r.min_value) if r.min_value is not None else None,
+            "max_value":      float(r.max_value) if r.max_value is not None else None,
+            "avg_value":      float(r.avg_value) if r.avg_value is not None else None,
+            "date_start":     str(r.date_start) if r.date_start else None,
+            "date_end":       str(r.date_end)   if r.date_end   else None,
+        }
+        for r in rows
+    ]
 
 
 # ═════════════════════════════════════════════════════════════
@@ -745,47 +763,60 @@ def get_by_date(
     date_to:       Optional[str] = Query(None),
     db: Session = Depends(get_db),
 ):
-    import pandas as pd
-
-    q = (
-        db.query(Measurement)
-        .join(Measurement.variable)
-        .filter(Measurement.station_id == station_id)
-        .filter(func.upper(Variable.code) == variable_code.strip().upper())
-    )
-    q = _apply_date_filters(q, date_from, date_to)
-    rows = q.order_by(Measurement.measured_at.asc()).all()
-
+    vc = variable_code.strip().upper()
+ 
+    # Resolver variable_id por código
+    variable = db.query(Variable).filter(
+        func.upper(Variable.code) == vc
+    ).first()
+    if not variable:
+        raise HTTPException(status_code=404, detail=f"Variable '{vc}' no encontrada")
+ 
+    # Construir filtros de fecha opcionales
+    date_filter = ""
+    params: dict = {
+        "sid":         station_id,
+        "vid":         str(variable.id),
+        "period_type": group_by,
+    }
+ 
+    if date_from:
+        date_filter += " AND period_start >= :date_from"
+        params["date_from"] = date_from
+    if date_to:
+        # Incluir hasta el final del día indicado
+        date_filter += " AND period_start <= :date_to"
+        params["date_to"] = date_to
+ 
+    rows = db.execute(
+        text(f"""
+            SELECT period_start, avg_value, min_value, max_value, record_count
+            FROM   public.by_date_stats
+            WHERE  station_id  = :sid
+              AND  variable_id = :vid
+              AND  period_type = :period_type
+              {date_filter}
+            ORDER  BY period_start ASC
+        """),
+        params,
+    ).fetchall()
+ 
     if not rows:
+        # Fallback informativo (no 404 para que el frontend muestre vacío)
         return []
-
-    df = pd.DataFrame([
-        {"measured_at": r.measured_at, "value": float(r.value)}
-        for r in rows
-    ])
-    df["measured_at"] = pd.to_datetime(df["measured_at"])
-
-    if   group_by == "hour":  df["period"] = df["measured_at"].dt.floor("h")
-    elif group_by == "day":   df["period"] = df["measured_at"].dt.date
-    elif group_by == "month": df["period"] = df["measured_at"].dt.to_period("M").dt.to_timestamp()
-    else:                     df["period"] = df["measured_at"].dt.to_period("Y").dt.to_timestamp()
-
-    agg = (
-        df.groupby("period")["value"]
-        .agg(avg="mean", min="min", max="max", count="count")
-        .reset_index()
-    )
-
+ 
     return [
         {
-            "period": str(row["period"]),
-            "avg":    round(float(row["avg"]),   4),
-            "min":    round(float(row["min"]),   4),
-            "max":    round(float(row["max"]),   4),
-            "count":  int(row["count"]),
+            "period": str(r.period_start),
+            "avg":    round(float(r.avg_value), 4) if r.avg_value is not None else None,
+            "min":    round(float(r.min_value), 4) if r.min_value is not None else None,
+            "max":    round(float(r.max_value), 4) if r.max_value is not None else None,
+            "count":  int(r.record_count),
         }
-        for _, row in agg.iterrows()
+        for r in rows
     ]
+ 
+ 
 
 
 # ═════════════════════════════════════════════════════════════
@@ -1171,220 +1202,130 @@ def get_daily_profile(
 # GET /annual-profile
 # ═════════════════════════════════════════════════════════════
 
+
 @router.get("/annual-profile")
 def get_annual_profile(
     station_id:    str           = Query(...),
     variable_code: str           = Query(...),
-    date_from:     Optional[str] = Query(None),
-    date_to:       Optional[str] = Query(None),
+    date_from:     Optional[str] = Query(None),  # mantenido por compatibilidad
+    date_to:       Optional[str] = Query(None),  # mantenido por compatibilidad
     db: Session = Depends(get_db),
 ):
-    import numpy as np
-    import pandas as pd
-
-    q = (
-        db.query(Measurement)
-        .join(Measurement.variable)
-        .filter(Measurement.station_id == station_id)
-        .filter(func.upper(Variable.code) == variable_code.strip().upper())
-    )
-    q = _apply_date_filters(q, date_from, date_to)
-    rows = q.order_by(Measurement.measured_at.asc()).all()
-
+    """
+    Nota: date_from / date_to se ignoran aquí porque el perfil anual
+    se calcula sobre todos los datos históricos (eso es lo que tiene
+    valor estadístico).  Si se necesita filtrar por rango, el recalculado
+    deberá segmentarse; por ahora se mantiene la lógica original.
+    """
+    vc    = variable_code.strip().upper()
+    is_hr = vc == "HR"
+ 
+    variable = db.query(Variable).filter(
+        func.upper(Variable.code) == vc
+    ).first()
+    if not variable:
+        raise HTTPException(status_code=404, detail=f"Variable '{vc}' no encontrada")
+ 
+    rows = db.execute(
+        text("""
+            SELECT doy, avg_value, min_value, max_value,
+                   q25_value, q75_value, n_years
+            FROM   public.annual_profile_stats
+            WHERE  station_id  = :sid
+              AND  variable_id = :vid
+            ORDER  BY doy ASC
+        """),
+        {"sid": station_id, "vid": str(variable.id)},
+    ).fetchall()
+ 
     if not rows:
-        raise HTTPException(status_code=404, detail="Sin datos para los filtros indicados")
-
-    is_hr = variable_code.strip().upper() == "HR"
-    step  = 1.0 if is_hr else 0.1
-
-    df = pd.DataFrame([
-        {"measured_at": r.measured_at, "value": float(r.value)}
+        raise HTTPException(
+            status_code=404,
+            detail="Sin datos precalculados. Sube un archivo primero."
+        )
+ 
+    series = [
+        {
+            "doy":     r.doy,
+            "avg":     round(float(r.avg_value), 3) if r.avg_value is not None else None,
+            "min":     round(float(r.min_value), 3) if r.min_value is not None else None,
+            "max":     round(float(r.max_value), 3) if r.max_value is not None else None,
+            "q25":     round(float(r.q25_value), 3) if r.q25_value is not None else None,
+            "q75":     round(float(r.q75_value), 3) if r.q75_value is not None else None,
+            "n_years": r.n_years,
+        }
         for r in rows
-    ])
-    df["measured_at"] = pd.to_datetime(df["measured_at"])
-    df["doy"]  = df["measured_at"].dt.dayofyear
-    df["date"] = df["measured_at"].dt.date
-
-    def _mode_val(arr):
-        if len(arr) == 0:
-            return None
-        bins = np.round(np.array(arr) / step) * step
-        u, c = np.unique(bins, return_counts=True)
-        return round(float(u[np.argmax(c)]), 2)
-
-    daily_records = []
-    for date, grp in df.groupby("date"):
-        vals = grp["value"].dropna().values
-        if len(vals) == 0:
-            continue
-        doy     = grp["doy"].iloc[0]
-        primary = _mode_val(vals) if is_hr else round(float(np.mean(vals)), 3)
-        daily_records.append({
-            "doy":     doy,
-            "primary": primary,
-            "min":     round(float(np.min(vals)), 3),
-            "max":     round(float(np.max(vals)), 3),
-            "q25":     round(float(np.percentile(vals, 25)), 3),
-            "q75":     round(float(np.percentile(vals, 75)), 3),
-        })
-
-    daily_df = pd.DataFrame(daily_records)
-
-    result = []
-    for doy in range(1, 367):
-        subset = daily_df[daily_df["doy"] == doy]
-        if len(subset) == 0:
-            continue
-        result.append({
-            "doy":     doy,
-            "avg":     round(float(subset["primary"].mean()), 3),
-            "min":     round(float(subset["min"].mean()),     3),
-            "max":     round(float(subset["max"].mean()),     3),
-            "q25":     round(float(subset["q25"].mean()),     3),
-            "q75":     round(float(subset["q75"].mean()),     3),
-            "n_years": int(len(subset)),
-        })
-
+    ]
+ 
     return {
-        "variable_code": variable_code.strip().upper(),
+        "variable_code": vc,
         "is_hr":         is_hr,
         "primary_stat":  "mode" if is_hr else "mean",
-        "series":        result,
-        "date_start":    str(rows[0].measured_at),
-        "date_end":      str(rows[-1].measured_at),
+        "series":        series,
+        "source":        "precalculado",
     }
-
+ 
 
 # ═════════════════════════════════════════════════════════════
 # GET /combined
 # ═════════════════════════════════════════════════════════════
 
+
 @router.get("/combined")
 def get_combined(
     station_id: str           = Query(...),
-    altitude:   float         = Query(0),
-    date_from:  Optional[str] = Query(None),
-    date_to:    Optional[str] = Query(None),
+    altitude:   float         = Query(0),    # mantenido por compatibilidad
+    date_from:  Optional[str] = Query(None), # mantenido por compatibilidad
+    date_to:    Optional[str] = Query(None), # mantenido por compatibilidad
     db: Session = Depends(get_db),
 ):
-    import pandas as pd
-    import numpy as np
-
-    def _q(code):
-        q = (
-            db.query(Measurement)
-            .join(Measurement.variable)
-            .filter(Measurement.station_id == station_id)
-            .filter(func.upper(Variable.code) == code)
+    """
+    Nota: altitude, date_from y date_to se leen del precalculado.
+    Si la altitud cambia significativamente, hacer un nuevo upload
+    volverá a calcular con la altitud actualizada de la estación.
+    """
+    temp_var = db.query(Variable).filter(Variable.code == "TEMP").first()
+    hr_var   = db.query(Variable).filter(Variable.code == "HR").first()
+ 
+    if not temp_var or not hr_var:
+        raise HTTPException(
+            status_code=404,
+            detail="Variables TEMP o HR no encontradas en la BD"
         )
-        return _apply_date_filters(q, date_from, date_to).all()
-
-    t_rows = _q("TEMP")
-    h_rows = _q("HR")
-
-    if not t_rows or not h_rows:
-        raise HTTPException(status_code=404, detail="Sin datos de T o HR para los filtros indicados")
-
-    t_map  = {str(r.measured_at): float(r.value) for r in t_rows}
-    joined = []
-
-    for r in h_rows:
-        T = t_map.get(str(r.measured_at))
-        if T is None:
-            continue
-        HR      = float(r.value)
-        p_sat   = 9.066 * np.exp(0.0641 * T) - 1.796 * np.exp(0.0805 * T)
-        p_tot   = 1013.25 * (1 - 2.25577e-5 * altitude) ** 5.2559
-        hr_frac = HR / 100
-        denom   = p_tot - hr_frac * p_sat
-        h_abs   = (18000 / 29) * (hr_frac * p_sat) / denom if denom > 0 else None
-        ts      = r.measured_at
-        joined.append({
-            "measured_at": ts,
-            "T":    T,
-            "HR":   HR,
-            "habs": round(h_abs, 4) if h_abs is not None else None,
-            "mes":  ts.month,
-            "hora": ts.hour,
-        })
-
-    if not joined:
-        raise HTTPException(status_code=404, detail="Sin datos cruzados T+HR")
-
-    df = pd.DataFrame(joined)
-    df["measured_at"] = pd.to_datetime(df["measured_at"])
-
-    df["T_bin"]  = (df["T"]  / 0.1).round() * 0.1
-    df["HR_bin"] = (df["HR"] / 1.0).round() * 1.0
-    density_raw = (
-        df.groupby(["T_bin", "HR_bin"]).size().reset_index(name="count")
-        .rename(columns={"T_bin": "T", "HR_bin": "HR"})
-    )
-    total_pts = len(df)
-    density_raw["pct"] = (density_raw["count"] / total_pts * 100).round(3)
-
-    density_sorted = density_raw.sort_values("count", ascending=False).copy()
-    density_sorted["cum_pct"] = density_sorted["count"].cumsum() / total_pts * 100
-    density_raw_merged = density_raw.merge(
-        density_sorted[["T", "HR", "cum_pct"]], on=["T", "HR"], how="left"
-    )
-
-    def _contour_level(cum):
-        if cum <= 90:  return "90"
-        if cum <= 95:  return "95"
-        if cum <= 99:  return "99"
-        return "out"
-
-    density_raw_merged["contour"] = density_raw_merged["cum_pct"].apply(_contour_level)
-    density = density_raw_merged.to_dict(orient="records")
-
-    humect_mask  = (df["T"] > 10) & (df["HR"] > 79)
-    humect_count = int(humect_mask.sum())
-    humect_pct   = round(humect_count / total_pts * 100, 2)
-
-    mobility = []
-    for mes in range(1, 13):
-        sub = df[df["mes"] == mes]
-        if len(sub) == 0:
-            continue
-        for hora in range(24):
-            h_sub = sub[sub["hora"] == hora]
-            if len(h_sub) == 0:
-                continue
-            mobility.append({
-                "mes":    mes,
-                "hora":   hora,
-                "T_avg":  round(float(h_sub["T"].mean()),  2),
-                "T_max":  round(float(h_sub["T"].max()),   2),
-                "HR_avg": round(float(h_sub["HR"].mean()), 2),
-                "HR_max": round(float(h_sub["HR"].max()),  2),
-            })
-
-    df_habs = df.dropna(subset=["habs"]).copy()
-    df_habs["period"] = df_habs["measured_at"].dt.to_period("M").dt.to_timestamp()
-    habs_monthly = (
-        df_habs.groupby("period")["habs"]
-        .mean().round(4).reset_index()
-        .rename(columns={"habs": "avg"})
-    )
-    habs_series = [
-        {"period": str(row["period"].date())[:7] + "-01", "avg": float(row["avg"])}
-        for _, row in habs_monthly.iterrows()
-    ]
-
-    scatter_sample = (
-        df[["T", "HR", "habs", "mes", "hora"]].dropna().head(2000).to_dict(orient="records")
-    )
-
+ 
+    row = db.execute(
+        text("""
+            SELECT density_json, humect_pct, humect_count, total_paired,
+                   habs_monthly_json, mobility_json, scatter_json
+            FROM   public.combined_stats
+            WHERE  station_id       = :sid
+              AND  variable_id_temp = :vid_t
+              AND  variable_id_hr   = :vid_h
+        """),
+        {
+            "sid":   station_id,
+            "vid_t": str(temp_var.id),
+            "vid_h": str(hr_var.id),
+        },
+    ).fetchone()
+ 
+    if not row:
+        raise HTTPException(
+            status_code=404,
+            detail="Sin datos precalculados. Sube archivos de TEMP y HR primero."
+        )
+ 
     return {
-        "density":      density,
-        "humect_pct":   humect_pct,
-        "humect_count": humect_count,
-        "habs_monthly": habs_series,
-        "scatter":      scatter_sample,
-        "mobility":     mobility,
-        "total_paired": total_pts,
+        "density":      json.loads(row.density_json      or "[]"),
+        "humect_pct":   row.humect_pct,
+        "humect_count": row.humect_count,
+        "habs_monthly": json.loads(row.habs_monthly_json or "[]"),
+        "scatter":      json.loads(row.scatter_json      or "[]"),
+        "mobility":     json.loads(row.mobility_json     or "[]"),
+        "total_paired": row.total_paired,
+        "source":       "precalculado",
     }
+
 
 
 # ═════════════════════════════════════════════════════════════
