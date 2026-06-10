@@ -157,7 +157,7 @@ const heatColor = (val, min, max, type) => {
 }
 
 // ══════════════════════════════════════════════════════════════
-// KDE HEATMAP SVG con D3 — reemplaza el canvas anterior
+// KDE HEATMAP SVG con D3
 // ══════════════════════════════════════════════════════════════
 function KDEHeatmapSVG({ densityPoints, tMin, tMax, hrMin, hrMax, width, height }) {
   const svgRef = useRef(null)
@@ -172,7 +172,6 @@ function KDEHeatmapSVG({ densityPoints, tMin, tMax, hrMin, hrMax, width, height 
     const xScale = d3.scaleLinear().domain([tMin, tMax]).range([0, pw])
     const yScale = d3.scaleLinear().domain([hrMin, hrMax]).range([ph, 0])
 
-    // ── KDE con d3-contour ──
     const contours = d3.contourDensity()
       .x(d => xScale(d.T))
       .y(d => yScale(d.HR))
@@ -183,11 +182,9 @@ function KDEHeatmapSVG({ densityPoints, tMin, tMax, hrMin, hrMax, width, height 
     const maxDensity = d3.max(contours, d => d.value) || 1
     const colorScale = d3.scaleSequential(d3.interpolateViridis).domain([0, maxDensity])
 
-    // ── Limpiar SVG anterior ──
     const svg = d3.select(svgRef.current)
     svg.selectAll('*').remove()
 
-    // ── Defs: clip + gradiente colorbar ──
     const defs = svg.append('defs')
 
     defs.append('clipPath')
@@ -206,16 +203,13 @@ function KDEHeatmapSVG({ densityPoints, tMin, tMax, hrMin, hrMax, width, height 
         .attr('stop-color', d3.interpolateViridis(1 - i / 10))
     })
 
-    // ── Grupo principal desplazado por padding ──
     const g = svg.append('g')
       .attr('transform', `translate(${pad.left},${pad.top})`)
 
-    // Fondo del área de plot
     g.append('rect')
       .attr('width', pw).attr('height', ph)
       .attr('fill', '#0a0a1a')
 
-    // ── Contornos rellenos ──
     g.append('g')
       .attr('clip-path', 'url(#kde-plot-clip)')
       .selectAll('path')
@@ -226,7 +220,6 @@ function KDEHeatmapSVG({ densityPoints, tMin, tMax, hrMin, hrMax, width, height 
       .attr('stroke', 'none')
       .attr('opacity', 1)
 
-    // ── Líneas de contorno encima (más visibles) ──
     g.append('g')
       .attr('clip-path', 'url(#kde-plot-clip)')
       .selectAll('path')
@@ -238,7 +231,6 @@ function KDEHeatmapSVG({ densityPoints, tMin, tMax, hrMin, hrMax, width, height 
       .attr('stroke-width', 0.6)
       .attr('opacity', 0.7)
 
-    // ── Línea referencia HR=79% ──
     const y79 = yScale(79)
     if (y79 >= 0 && y79 <= ph) {
       g.append('line')
@@ -255,7 +247,6 @@ function KDEHeatmapSVG({ densityPoints, tMin, tMax, hrMin, hrMax, width, height 
         .text('HR=79%')
     }
 
-    // ── Línea referencia T=10°C ──
     const x10 = xScale(10)
     if (x10 >= 0 && x10 <= pw) {
       g.append('line')
@@ -271,7 +262,6 @@ function KDEHeatmapSVG({ densityPoints, tMin, tMax, hrMin, hrMax, width, height 
         .text('T=10°C')
     }
 
-    // ── Grid lines ──
     g.append('g')
       .attr('transform', `translate(0,${ph})`)
       .call(
@@ -301,7 +291,6 @@ function KDEHeatmapSVG({ densityPoints, tMin, tMax, hrMin, hrMax, width, height 
         .attr('opacity', 0.6)
       )
 
-    // ── Eje X ──
     g.append('g')
       .attr('transform', `translate(0,${ph})`)
       .call(
@@ -324,7 +313,6 @@ function KDEHeatmapSVG({ densityPoints, tMin, tMax, hrMin, hrMax, width, height 
       .attr('text-anchor', 'middle')
       .text('Temperatura (°C)')
 
-    // ── Eje Y ──
     g.append('g')
       .call(
         d3.axisLeft(yScale)
@@ -347,14 +335,12 @@ function KDEHeatmapSVG({ densityPoints, tMin, tMax, hrMin, hrMax, width, height 
       .attr('text-anchor', 'middle')
       .text('HR (%)')
 
-    // ── Borde del área ──
     g.append('rect')
       .attr('width', pw).attr('height', ph)
       .attr('fill', 'none')
       .attr('stroke', '#475569')
       .attr('stroke-width', 0.8)
 
-    // ── Colorbar ──
     const cbX = pw + 14
     const cbW = 16
 
@@ -365,7 +351,6 @@ function KDEHeatmapSVG({ densityPoints, tMin, tMax, hrMin, hrMax, width, height 
       .attr('stroke', '#475569')
       .attr('stroke-width', 0.5)
 
-    // Ticks colorbar
     const cbTickValues = d3.range(5).map(i => (i / 4) * maxDensity)
     cbTickValues.forEach(v => {
       const cy = ph - (v / maxDensity) * ph
@@ -1142,7 +1127,33 @@ function SectionIsolines({ stationId, dateFrom, dateTo }) {
 
 // ══════════════════════════════════════════════════════════════
 // SECTION C.2 — Perfil diario promedio por mes
+// FIX: fillHours garantiza las 24 horas siempre presentes.
+//      XAxis forzado con domain [0,23] y ticks explícitos.
 // ══════════════════════════════════════════════════════════════
+
+// Helper: rellena horas faltantes con null para garantizar 0–23
+const fillHours = (data) => {
+  if (!data?.length) return Array.from({ length: 24 }, (_, h) => ({
+    hora: h, avg: null, min: null, max: null, mode: null, q25: null, q75: null,
+  }))
+  const map = {}
+  data.forEach(d => { map[d.hora] = d })
+  return Array.from({ length: 24 }, (_, h) => ({
+    hora: h,
+    avg:  null,
+    min:  null,
+    max:  null,
+    mode: null,
+    q25:  null,
+    q75:  null,
+    ...map[h],
+  }))
+}
+
+// Ticks fijos de 0 a 23 para el XAxis del perfil diario
+const HOUR_TICKS = Array.from({ length: 24 }, (_, i) => i)
+const fmtHour   = h => `${String(h).padStart(2, '0')}:00`
+
 function SectionDailyProfile({ stationId, dateFrom, dateTo }) {
   const [tProfile, setTProfile] = useState(null)
   const [hProfile, setHProfile] = useState(null)
@@ -1203,8 +1214,9 @@ function SectionDailyProfile({ stationId, dateFrom, dateTo }) {
     </Card>
   )
 
-  const tData = getTData()
-  const hData = getHData()
+  // ── FIX: siempre 24 puntos, dominio forzado ────────────────
+  const tData = fillHours(getTData())
+  const hData = fillHours(getHData())
   const monthLabel = selMonth === '0' ? 'Anual' : MONTHS[parseInt(selMonth) - 1]
 
   return (
@@ -1216,64 +1228,89 @@ function SectionDailyProfile({ stationId, dateFrom, dateTo }) {
       </div>
       <MonthSelector />
 
-      {tData.length > 0 && (
-        <SectionCard title={`Temperatura — Perfil diario (${monthLabel})`} subtitle="Estadísticos horarios">
-          <ResponsiveContainer width="100%" height={300}>
-            <AreaChart data={tData} margin={{ top: 4, right: 8, left: -10, bottom: 0 }}>
-              <defs>
-                <linearGradient id="tpg" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%"  stopColor="#ef4444" stopOpacity={0.25} />
-                  <stop offset="95%" stopColor="#ef4444" stopOpacity={0} />
-                </linearGradient>
-              </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
-              <XAxis dataKey="hora" tickFormatter={h => `${String(h).padStart(2,'0')}:00`} tick={{ fontSize: 10, fill: '#94a3b8' }} />
-              <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} unit="°C" />
-              <Tooltip labelFormatter={h => `${String(h).padStart(2,'0')}:00`} contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }} />
-              <Legend />
-              <Area type="monotone" dataKey="max"  name="Máx"      stroke="#ef4444" fill="none"      strokeWidth={1} opacity={0.5} dot={false} />
-              <Area type="monotone" dataKey="q75"  name="Q75"      stroke="#f97316" fill="none"      strokeWidth={1} strokeDasharray="4 2" dot={false} />
-              <Area type="monotone" dataKey="avg"  name="Promedio" stroke="#ef4444" fill="url(#tpg)" strokeWidth={2} dot={false} />
-              <Area type="monotone" dataKey="mode" name="Moda"     stroke="#fbbf24" fill="none"      strokeWidth={1} strokeDasharray="6 2" dot={false} />
-              <Area type="monotone" dataKey="q25"  name="Q25"      stroke="#f97316" fill="none"      strokeWidth={1} strokeDasharray="4 2" dot={false} />
-              <Area type="monotone" dataKey="min"  name="Mín"      stroke="#ef4444" fill="none"      strokeWidth={1} opacity={0.5} dot={false} />
-            </AreaChart>
-          </ResponsiveContainer>
-        </SectionCard>
-      )}
+      {/* ── Temperatura ─────────────────────────────────────── */}
+      <SectionCard
+        title={`Temperatura — Perfil diario (${monthLabel})`}
+        subtitle="Estadísticos horarios"
+      >
+        <ResponsiveContainer width="100%" height={300}>
+          <AreaChart data={tData} margin={{ top: 4, right: 8, left: -10, bottom: 0 }}>
+            <defs>
+              <linearGradient id="tpg" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="5%"  stopColor="#ef4444" stopOpacity={0.25} />
+                <stop offset="95%" stopColor="#ef4444" stopOpacity={0} />
+              </linearGradient>
+            </defs>
+            <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+            {/* FIX: domain + ticks explícitos garantizan 0–23 siempre */}
+            <XAxis
+              dataKey="hora"
+              type="number"
+              domain={[0, 23]}
+              ticks={HOUR_TICKS}
+              tickFormatter={fmtHour}
+              tick={{ fontSize: 10, fill: '#94a3b8' }}
+              interval={0}
+            />
+            <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} unit="°C" />
+            <Tooltip
+              labelFormatter={fmtHour}
+              contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }}
+            />
+            <Legend />
+            <Area type="monotone" dataKey="max"  name="Máx"      stroke="#ef4444" fill="none"      strokeWidth={1} opacity={0.5} dot={false} connectNulls={false} />
+            <Area type="monotone" dataKey="q75"  name="Q75"      stroke="#f97316" fill="none"      strokeWidth={1} strokeDasharray="4 2" dot={false} connectNulls={false} />
+            <Area type="monotone" dataKey="avg"  name="Promedio" stroke="#ef4444" fill="url(#tpg)" strokeWidth={2} dot={false} connectNulls={false} />
+            <Area type="monotone" dataKey="mode" name="Moda"     stroke="#fbbf24" fill="none"      strokeWidth={1} strokeDasharray="6 2" dot={false} connectNulls={false} />
+            <Area type="monotone" dataKey="q25"  name="Q25"      stroke="#f97316" fill="none"      strokeWidth={1} strokeDasharray="4 2" dot={false} connectNulls={false} />
+            <Area type="monotone" dataKey="min"  name="Mín"      stroke="#ef4444" fill="none"      strokeWidth={1} opacity={0.5} dot={false} connectNulls={false} />
+          </AreaChart>
+        </ResponsiveContainer>
+      </SectionCard>
 
-      {hData.length > 0 && (
-        <SectionCard title={`Humedad Relativa — Perfil diario (${monthLabel})`} subtitle="Estadísticos horarios (moda como estadístico principal)">
-          <ResponsiveContainer width="100%" height={300}>
-            <AreaChart data={hData} margin={{ top: 4, right: 8, left: -10, bottom: 0 }}>
-              <defs>
-                <linearGradient id="hpg" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%"  stopColor="#3b82f6" stopOpacity={0.25} />
-                  <stop offset="95%" stopColor="#3b82f6" stopOpacity={0} />
-                </linearGradient>
-              </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
-              <XAxis dataKey="hora" tickFormatter={h => `${String(h).padStart(2,'0')}:00`} tick={{ fontSize: 10, fill: '#94a3b8' }} />
-              <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} unit="%" domain={[0, 100]} />
-              <Tooltip labelFormatter={h => `${String(h).padStart(2,'0')}:00`} contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }} />
-              <Legend />
-              <Area type="monotone" dataKey="max"  name="Máx"      stroke="#3b82f6" fill="none"      strokeWidth={1} opacity={0.5} dot={false} />
-              <Area type="monotone" dataKey="q75"  name="Q75"      stroke="#6366f1" fill="none"      strokeWidth={1} strokeDasharray="4 2" dot={false} />
-              <Area type="monotone" dataKey="avg"  name="Promedio" stroke="#3b82f6" fill="url(#hpg)" strokeWidth={2} dot={false} />
-              <Area type="monotone" dataKey="mode" name="Moda"     stroke="#a78bfa" fill="none"      strokeWidth={2} strokeDasharray="6 2" dot={false} />
-              <Area type="monotone" dataKey="q25"  name="Q25"      stroke="#6366f1" fill="none"      strokeWidth={1} strokeDasharray="4 2" dot={false} />
-              <Area type="monotone" dataKey="min"  name="Mín"      stroke="#3b82f6" fill="none"      strokeWidth={1} opacity={0.5} dot={false} />
-            </AreaChart>
-          </ResponsiveContainer>
-        </SectionCard>
-      )}
+      {/* ── Humedad Relativa ─────────────────────────────────── */}
+      <SectionCard
+        title={`Humedad Relativa — Perfil diario (${monthLabel})`}
+        subtitle="Estadísticos horarios (moda como estadístico principal)"
+      >
+        <ResponsiveContainer width="100%" height={300}>
+          <AreaChart data={hData} margin={{ top: 4, right: 8, left: -10, bottom: 0 }}>
+            <defs>
+              <linearGradient id="hpg" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="5%"  stopColor="#3b82f6" stopOpacity={0.25} />
+                <stop offset="95%" stopColor="#3b82f6" stopOpacity={0} />
+              </linearGradient>
+            </defs>
+            <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+            {/* FIX: domain + ticks explícitos garantizan 0–23 siempre */}
+            <XAxis
+              dataKey="hora"
+              type="number"
+              domain={[0, 23]}
+              ticks={HOUR_TICKS}
+              tickFormatter={fmtHour}
+              tick={{ fontSize: 10, fill: '#94a3b8' }}
+              interval={0}
+            />
+            <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} unit="%" domain={[0, 100]} />
+            <Tooltip
+              labelFormatter={fmtHour}
+              contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }}
+            />
+            <Legend />
+            <Area type="monotone" dataKey="max"  name="Máx"      stroke="#3b82f6" fill="none"      strokeWidth={1} opacity={0.5} dot={false} connectNulls={false} />
+            <Area type="monotone" dataKey="q75"  name="Q75"      stroke="#6366f1" fill="none"      strokeWidth={1} strokeDasharray="4 2" dot={false} connectNulls={false} />
+            <Area type="monotone" dataKey="avg"  name="Promedio" stroke="#3b82f6" fill="url(#hpg)" strokeWidth={2} dot={false} connectNulls={false} />
+            <Area type="monotone" dataKey="mode" name="Moda"     stroke="#a78bfa" fill="none"      strokeWidth={2} strokeDasharray="6 2" dot={false} connectNulls={false} />
+            <Area type="monotone" dataKey="q25"  name="Q25"      stroke="#6366f1" fill="none"      strokeWidth={1} strokeDasharray="4 2" dot={false} connectNulls={false} />
+            <Area type="monotone" dataKey="min"  name="Mín"      stroke="#3b82f6" fill="none"      strokeWidth={1} opacity={0.5} dot={false} connectNulls={false} />
+          </AreaChart>
+        </ResponsiveContainer>
+      </SectionCard>
     </>
   )
 }
 
-// ══════════════════════════════════════════════════════════════
-// SECTION C.3 — Perfil anual promedio
-// ══════════════════════════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════
 // SECTION C.3 — Perfil anual promedio
 // ══════════════════════════════════════════════════════════════
@@ -1484,7 +1521,6 @@ function SectionCombined({ stationId, stationAlt, dateFrom, dateTo }) {
 
   return (
     <>
-      {/* ── d.1) Densidad conjunta f(HR,T) — SVG D3 ── */}
       <SectionCard
         title="d.1) Densidad conjunta f(HR,T)"
         subtitle={`Tiempo de humectación (T>10°C y HR>79%): ${data.humect_pct}% (${data.humect_count} registros)`}
@@ -1512,7 +1548,6 @@ function SectionCombined({ stationId, stationAlt, dateFrom, dateTo }) {
         </div>
       </SectionCard>
 
-      {/* ── d.2) Humedad Absoluta mensual ── */}
       {data.habs_monthly?.length > 0 && (
         <SectionCard title="d.2) Humedad Absoluta mensual" subtitle={`Altitud: ${stationAlt || 0} m s.n.m.`}>
           <div style={{ marginBottom: 10, fontSize: 11, color: '#64748b', fontFamily: 'monospace' }}>
@@ -1536,7 +1571,6 @@ function SectionCombined({ stationId, stationAlt, dateFrom, dateTo }) {
         </SectionCard>
       )}
 
-      {/* ── d.3) Gráfico psicrométrico ── */}
       {data.scatter?.length > 0 && (
         <SectionCard title="d.3) Gráfico psicrométrico (T vs H abs)">
           <ResponsiveContainer width="100%" height={320}>
@@ -1554,7 +1588,6 @@ function SectionCombined({ stationId, stationAlt, dateFrom, dateTo }) {
         </SectionCard>
       )}
 
-      {/* ── d.4) Movilidad del flujo T × HR ── */}
       {mobilityT.length > 0 && (
         <SectionCard
           title="d.4) Movilidad del flujo T × HR durante el año"
