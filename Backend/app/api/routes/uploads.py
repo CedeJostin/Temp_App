@@ -151,7 +151,14 @@ async def upload_file(
   # ─────────────────────────────────────────────────────────
     # 5. INSERTAR MEDICIONES
     # ─────────────────────────────────────────────────────────
+    
     try:
+        # Diagnóstico — borrar después
+        print(f"🔍 DF shape: {df.shape}")
+        print(f"🔍 Primeras filas:\n{df.head()}")
+        print(f"🔍 Últimas filas:\n{df.tail()}")
+        print(f"🔍 Rango fechas: {df['measured_at'].min()} → {df['measured_at'].max()}")
+        print(f"🔍 Nulos en value: {df['value'].isna().sum()}")
         rows_inserted = insert_measurements(
             db=db,
             df=df,

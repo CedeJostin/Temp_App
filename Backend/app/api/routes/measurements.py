@@ -191,7 +191,7 @@ def _fit_gaussian_components(
     p0 = np.array(p0, dtype=float)
 
     def gauss_pdf(x, mu, sigma):
-        return np.exp(-0.5 * ((x - mu) / sigma) ** 2) / (sigma * np.sqrt(2 * np.PI))
+        return np.exp(-0.5 * ((x - mu) / sigma) ** 2) / (sigma * np.sqrt(2 * np.pi))
 
     def model(x, params):
         total = np.zeros_like(x, dtype=float)
