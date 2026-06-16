@@ -289,69 +289,96 @@ def _fit_beta_components(
     x_pct  = np.array([d["x"]    for d in fdp])
     y_real = np.array([d["freq"] for d in fdp])
     paso   = float(x_pct[1] - x_pct[0]) if len(x_pct) > 1 else 1.0
+    n_pts  = len(x_pct)
 
-    sigma_smooth = max(2.0, len(x_pct) / 50.0)
+    # ── Suavizado para estabilizar derivadas ─────────────────────
+    sigma_smooth = max(1.5, n_pts / 60.0)
     y_smooth = gaussian_filter1d(y_real, sigma=sigma_smooth)
 
-    dy = np.diff(y_smooth)
-    peak_candidates = []
-    for i in range(len(dy) - 1):
-        if dy[i] > 0 and dy[i + 1] <= 0:
-            peak_candidates.append(i + 1)
-
     mean_freq = float(np.mean(y_smooth))
+
+    # ── 1ª y 2ª derivada de la FDP ───────────────────────────────
+    d1 = np.gradient(y_smooth, x_pct)
+    d2 = np.gradient(d1,       x_pct)
+
+    # ── Detección de curvas por regiones cóncavas hacia abajo ────
+    # (cambio de signo de la 2ª derivada de + a -).  Cada región
+    # cóncava (d2 < 0) corresponde a un pico u hombro; los cruces
+    # de - a + son los límites A/B entre curvas.
+    concave_down = d2 < 0
+
+    # Índices donde la 2ª derivada cruza hacia arriba (valles / límites)
+    up_cross = [0]
+    for i in range(len(d2) - 1):
+        if d2[i] <= 0 and d2[i + 1] > 0:
+            up_cross.append(i + 1)
+    up_cross.append(n_pts - 1)
+    up_cross = sorted(set(up_cross))
+
+    # ── Construir un segmento (curva candidata) por cada región ──
+    segments = []  # cada uno: dict con idx_mode, mode, A, B, mass
+    for j in range(len(up_cross) - 1):
+        lo, hi = up_cross[j], up_cross[j + 1]
+        if hi <= lo:
+            continue
+        seg_mask = np.zeros(n_pts, dtype=bool)
+        seg_mask[lo:hi + 1] = True
+        # Solo cuenta como curva si contiene una zona cóncava hacia abajo
+        if not (concave_down[lo:hi + 1]).any():
+            continue
+        local = y_smooth[lo:hi + 1]
+        idx_mode = lo + int(np.argmax(local))
+        mass = float(np.sum(y_real[lo:hi + 1]))
+        segments.append({
+            "idx":  idx_mode,
+            "mode": float(x_pct[idx_mode]),
+            "A":    float(x_pct[lo]),
+            "B":    float(x_pct[hi]),
+            "mass": mass,
+        })
+
+    # Spike de saturación al extremo derecho (subida final hacia 100%)
     has_right_spike = (
-        len(y_smooth) > 10 and
-        float(np.mean(y_smooth[-3:])) > mean_freq * 1.5
+        n_pts > 10 and float(np.mean(y_smooth[-3:])) > mean_freq * 1.2
     )
-    has_left_spike = (
-        len(y_smooth) > 10 and
-        float(np.mean(y_smooth[:3])) > mean_freq * 1.5
-    )
-
     if has_right_spike:
-        last_idx = len(x_pct) - 1
-        if not any(abs(p - last_idx) <= 3 for p in peak_candidates):
-            peak_candidates.append(last_idx)
+        last_x = float(x_pct[-1])
+        if not any(s["mode"] >= last_x - 4 for s in segments):
+            lo = max(0, n_pts - 6)
+            segments.append({
+                "idx":  n_pts - 1,
+                "mode": last_x,
+                "A":    float(x_pct[lo]),
+                "B":    last_x,
+                "mass": float(np.sum(y_real[lo:])),
+            })
 
-    if has_left_spike:
-        if not any(p <= 3 for p in peak_candidates):
-            peak_candidates.insert(0, 0)
+    # ── Conservar las n_components curvas con mayor masa de datos ─
+    segments.sort(key=lambda s: s["mass"], reverse=True)
+    segments = segments[:n_components]
+    # Si la FDP es muy plana y faltan regiones, rellenar con máximos
+    if len(segments) < n_components:
+        used = {s["idx"] for s in segments}
+        order = np.argsort(y_smooth)[::-1]
+        for idx in order:
+            if len(segments) >= n_components:
+                break
+            if any(abs(int(idx) - u) <= 3 for u in used):
+                continue
+            used.add(int(idx))
+            segments.append({
+                "idx":  int(idx),
+                "mode": float(x_pct[idx]),
+                "A":    float(x_pct[max(0, idx - 4)]),
+                "B":    float(x_pct[min(n_pts - 1, idx + 4)]),
+                "mass": float(y_real[idx]),
+            })
+    segments.sort(key=lambda s: s["mode"])
 
-    if len(peak_candidates) < n_components:
-        mask = np.ones(len(y_smooth), dtype=bool)
-        for idx in peak_candidates:
-            mask[max(0, idx - 3):min(len(mask), idx + 4)] = False
-        remaining = np.where(mask)[0]
-        if len(remaining) > 0:
-            extra = remaining[np.argsort(y_smooth[remaining])[::-1]]
-            for e in extra:
-                peak_candidates.append(int(e))
-                if len(peak_candidates) >= n_components:
-                    break
-
-    peak_candidates = sorted(
-        peak_candidates,
-        key=lambda i: y_smooth[min(i, len(y_smooth)-1)],
-        reverse=True,
-    )[:n_components]
-    peak_candidates = sorted(peak_candidates)
-
-    def get_peak_extent(pk_idx: int, threshold_frac: float = 0.20) -> tuple[float, float]:
-        peak_val = y_smooth[min(pk_idx, len(y_smooth) - 1)]
-        if peak_val <= 0:
-            return 0.0, 100.0
-        threshold = max(peak_val * threshold_frac, mean_freq * 0.30)
-
-        li = pk_idx
-        while li > 0 and y_smooth[li] > threshold:
-            li -= 1
-
-        ri = pk_idx
-        while ri < len(x_pct) - 1 and y_smooth[ri] > threshold:
-            ri += 1
-
-        return float(x_pct[li]), float(x_pct[ri])
+    peak_candidates = [s["idx"] for s in segments]
+    seg_bounds      = {s["idx"]: (s["A"], s["B"]) for s in segments}
+    total_mass      = sum(s["mass"] for s in segments) or 1.0
+    seg_w0          = {s["idx"]: max(s["mass"] / total_mass, 0.01) for s in segments}
 
     def beta_gen_pdf(x_arr_pct, a, b, A, B):
         width = B - A
@@ -389,43 +416,66 @@ def _fit_beta_components(
         y_hat = model(p_norm)
         return float(np.mean((y_real - y_hat) ** 2))
 
+    # ── Tablas estándar Moda / Varianza → (α, β) ─────────────────
+    # La malla α,β ∈ {1.1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5} reproduce
+    # exactamente las tablas estándar (la moda y la varianza de una
+    # Beta sobre esos valores).  Para cada pico se busca la pareja
+    # (α, β) cuya moda y varianza se ajusten a las del dato, igual que
+    # el método de referencia "buscar en las tablas".
+    ALFA_GRID = np.array([1.1, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0])
+    BETA_GRID = ALFA_GRID
+    AB_MIN    = 2.0   # piso de α,β para curvas con pico (evita cajas uniformes)
+
+    def seed_ab(m01: float, var01: float) -> tuple[float, float]:
+        best = (2.0, 2.0)
+        best_score = 1e18
+        for a in ALFA_GRID:
+            for b in BETA_GRID:
+                mode_ab = (a - 1.0) / (a + b - 2.0)            # moda en [0,1]
+                var_ab  = a * b / ((a + b) ** 2 * (a + b + 1.0))
+                # moda como criterio principal; varianza como ajuste fino
+                score = (mode_ab - m01) ** 2 + 8.0 * (var_ab - var01) ** 2
+                if score < best_score:
+                    best_score = score
+                    best = (float(a), float(b))
+        return best
+
+    def estimate_var01(A0: float, B0: float, width: float) -> float:
+        seg = (x_pct >= A0) & (x_pct <= B0)
+        wts = y_real[seg]
+        if seg.sum() >= 2 and float(wts.sum()) > 0:
+            xn = (x_pct[seg] - A0) / width
+            mu = float(np.sum(wts * xn) / np.sum(wts))
+            v  = float(np.sum(wts * (xn - mu) ** 2) / np.sum(wts))
+            return float(np.clip(v, 0.005, 0.08))
+        return 0.03
+
     def build_init(concentration: float):
         p0_list: list[float] = []
         bounds_list: list[tuple] = []
 
         for k, pk in enumerate(peak_candidates):
-            mode_pct = float(x_pct[min(pk, len(x_pct)-1)])
-            is_right_spike = mode_pct >= 97.0
-            is_left_spike  = mode_pct <= 3.0
+            mode_pct = float(x_pct[min(pk, n_pts - 1)])
+            A_seg, B_seg = seg_bounds[pk]
+            w0 = seg_w0[pk]
 
-            A_ext, B_ext = get_peak_extent(pk)
-
-            if k > 0:
-                prev_mode = float(x_pct[min(peak_candidates[k-1], len(x_pct)-1)])
-                left_width = max((mode_pct - prev_mode) / 2.0, 3.0)
-            else:
-                left_width = max(mode_pct - A_ext, 3.0)
-
-            if k < len(peak_candidates) - 1:
-                next_mode = float(x_pct[min(peak_candidates[k+1], len(x_pct)-1)])
-                right_width = max((next_mode - mode_pct) / 2.0, 3.0)
-            else:
-                right_width = max(B_ext - mode_pct, 3.0)
-
-            A0 = max(A_ext, max(0.0, mode_pct - left_width))
-            B0 = min(B_ext, min(101.0, mode_pct + right_width))
-
-            A0 = min(A0, mode_pct - 3.0)
-            B0 = max(B0, mode_pct + 3.0)
+            # Bordes [A, B] ya provienen de los cambios de signo de la 2ª
+            # derivada; se aseguran de envolver la moda con holgura mínima.
+            A0 = min(A_seg, mode_pct - 3.0)
+            B0 = max(B_seg, mode_pct + 3.0)
             A0 = max(A0, 0.0)
             B0 = min(B0, 101.0)
 
+            is_right_spike = (mode_pct >= 97.0) or (B_seg >= float(x_pct[-1]) - 1e-6 and mode_pct >= 90.0)
+            is_left_spike  = mode_pct <= 3.0
+
             if is_right_spike:
-                a0 = max(concentration * 0.5, 3.0)
+                # Curva de saturación: Beta con beta<1 (sube hacia 100%, sin máximo)
+                a0 = max(concentration * 0.4, 4.0)
                 b0 = 0.5
-                A0 = max(0.0, 90.0)
+                A0 = min(A0, 90.0)
                 B0 = 101.0
-                p0_list.extend([a0, b0, A0, B0, 1.0 / n_components])
+                p0_list.extend([a0, b0, A0, B0, w0])
                 bounds_list += [
                     (1.1,   500.0),
                     (0.05,  0.99),
@@ -436,10 +486,10 @@ def _fit_beta_components(
 
             elif is_left_spike:
                 a0 = 0.5
-                b0 = max(concentration * 0.5, 3.0)
+                b0 = max(concentration * 0.4, 4.0)
                 A0 = -1.0
-                B0 = min(101.0, 10.0)
-                p0_list.extend([a0, b0, A0, B0, 1.0 / n_components])
+                B0 = min(101.0, max(B_seg, 10.0))
+                p0_list.extend([a0, b0, A0, B0, w0])
                 bounds_list += [
                     (0.05, 0.99),
                     (1.1,  500.0),
@@ -455,16 +505,19 @@ def _fit_beta_components(
                     A0 = max(0.0, mode_pct - 5.0)
                     B0 = min(101.0, mode_pct + 5.0)
 
-                m01 = (mode_pct - A0) / width
-                m01 = np.clip(m01, 0.05, 0.95)
-                a0 = m01 * (concentration - 2.0) + 1.0
-                b0 = (1.0 - m01) * (concentration - 2.0) + 1.0
-                a0 = max(a0, 1.1)
-                b0 = max(b0, 1.1)
-                p0_list.extend([a0, b0, A0, B0, 1.0 / n_components])
+                # alpha/beta desde las tablas estándar, según la moda
+                # relativa y la varianza del dato dentro de [A, B]
+                m01 = float(np.clip((mode_pct - A0) / width, 0.05, 0.95))
+                var01 = estimate_var01(A0, B0, width)
+                a0, b0 = seed_ab(m01, var01)
+                # Piso mínimo: evita que la curva colapse a uniforme (α,β≈1),
+                # que se dibujaría como un rectángulo plano en vez de un pico.
+                a0 = max(a0, AB_MIN)
+                b0 = max(b0, AB_MIN)
+                p0_list.extend([a0, b0, A0, B0, w0])
 
-                search_margin = max(8.0, width * 0.40)
-
+                # Margen de búsqueda alrededor de los límites detectados
+                search_margin = max(6.0, width * 0.35)
                 A_lo = max(0.0, A0 - search_margin)
                 A_hi = max(0.0, min(mode_pct - 1.0, A0 + search_margin * 0.5))
                 B_lo = max(mode_pct + 1.0, B0 - search_margin * 0.5)
@@ -476,11 +529,11 @@ def _fit_beta_components(
                     B_lo = min(B_hi - 1.0, mode_pct + 1.0)
 
                 bounds_list += [
-                    (1.01,  500.0),
-                    (1.01,  500.0),
-                    (A_lo,  A_hi),
-                    (B_lo,  B_hi),
-                    (0.001, 1.0),
+                    (AB_MIN, 500.0),
+                    (AB_MIN, 500.0),
+                    (A_lo,   A_hi),
+                    (B_lo,   B_hi),
+                    (0.001,  1.0),
                 ]
 
         return np.array(p0_list, dtype=float), bounds_list
@@ -827,6 +880,65 @@ def get_stats(
         status_code=404,
         detail="Sin datos precalculados. Sube un archivo CSV primero."
     )
+
+
+# ═════════════════════════════════════════════════════════════
+# POST /stats/recalculate
+# Recalcula el ajuste de distribución (Beta/Gaussiana) desde las
+# mediciones ya almacenadas, SIN re-subir archivos. Útil para
+# aplicar nueva lógica de cálculo al historial existente.
+# ═════════════════════════════════════════════════════════════
+
+@router.post("/stats/recalculate")
+def recalculate_stats(
+    station_id:    str           = Query(..., description="UUID de la estación"),
+    variable_code: Optional[str] = Query(None, description="TEMP o HR. Si se omite, recalcula ambas."),
+    db: Session = Depends(get_db),
+):
+    import pandas as pd
+    from app.services.analytics_service import _calc_distribution
+
+    # Variables a recalcular
+    if variable_code:
+        codes = [variable_code.strip().upper()]
+    else:
+        codes = ["TEMP", "HR"]
+
+    resultados = []
+    for vc in codes:
+        variable = db.query(Variable).filter(func.upper(Variable.code) == vc).first()
+        if not variable:
+            resultados.append({"variable": vc, "ok": False, "msg": f"Variable '{vc}' no encontrada"})
+            continue
+
+        rows = (
+            db.query(Measurement)
+            .filter(Measurement.station_id  == station_id)
+            .filter(Measurement.variable_id == str(variable.id))
+            .order_by(Measurement.measured_at.asc())
+            .all()
+        )
+        if not rows:
+            resultados.append({"variable": vc, "ok": False, "msg": "Sin mediciones para esta estación"})
+            continue
+
+        df = pd.DataFrame([
+            {"measured_at": r.measured_at, "value": float(r.value)}
+            for r in rows
+        ])
+        df["measured_at"] = pd.to_datetime(df["measured_at"])
+
+        try:
+            logs = _calc_distribution(db, df, station_id, str(variable.id), vc)
+            resultados.append({"variable": vc, "ok": True, "n": len(df), "msg": "; ".join(logs)})
+        except Exception as e:
+            db.rollback()
+            resultados.append({"variable": vc, "ok": False, "msg": f"Error: {e}"})
+
+    return {
+        "station_id": station_id,
+        "recalculado": resultados,
+    }
 
 
 # ═════════════════════════════════════════════════════════════

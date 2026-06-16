@@ -683,6 +683,8 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
   const [hStats,  setHStats]  = useState(null)
   const [loading, setLoading] = useState(false)
   const [error,   setError]   = useState(null)
+  const [recalc,  setRecalc]  = useState(false)
+  const [recalcMsg, setRecalcMsg] = useState(null)
 
   const load = useCallback(async () => {
     if (!stationId) return
@@ -699,6 +701,24 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
   }, [stationId, dateFrom, dateTo])
 
   useEffect(() => { load() }, [load])
+
+  // Recalcula el ajuste FDP desde la BD (sin re-subir archivos) y recarga
+  const handleRecalc = useCallback(async () => {
+    if (!stationId || recalc) return
+    setRecalc(true); setRecalcMsg(null); setError(null)
+    try {
+      const res = await measurementsApi.recalculate({ station_id: stationId })
+      const ok  = (res.recalculado ?? []).filter(r => r.ok).map(r => r.variable)
+      const bad = (res.recalculado ?? []).filter(r => !r.ok)
+      setRecalcMsg(
+        bad.length
+          ? `Recalculado: ${ok.join(', ') || '—'}. Errores: ${bad.map(b => `${b.variable} (${b.msg})`).join('; ')}`
+          : `✓ Recalculado correctamente: ${ok.join(', ')}`
+      )
+      await load()
+    } catch (e) { setError(e.message) }
+    finally { setRecalc(false) }
+  }, [stationId, recalc, load])
 
   if (error) return <Err msg={error} />
 
@@ -745,6 +765,28 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
 
   return (
     <>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12, flexWrap: 'wrap' }}>
+        <button
+          onClick={handleRecalc}
+          disabled={recalc || loading || !stationId}
+          style={{
+            display: 'flex', alignItems: 'center', gap: 6,
+            padding: '8px 16px', borderRadius: 8, border: '1px solid #334155',
+            background: recalc ? '#1e293b' : '#2563eb', color: '#f1f5f9',
+            fontSize: 13, fontWeight: 600, cursor: (recalc || loading) ? 'not-allowed' : 'pointer',
+            opacity: (recalc || loading || !stationId) ? 0.6 : 1,
+          }}
+          title="Recalcula el ajuste FDP con la lógica actual usando las mediciones ya cargadas (no requiere re-subir archivos)"
+        >
+          {recalc ? '⏳ Recalculando…' : '🔄 Recalcular FDP'}
+        </button>
+        {recalcMsg && (
+          <span style={{ fontSize: 12, color: recalcMsg.startsWith('✓') ? '#22c55e' : '#f59e0b' }}>
+            {recalcMsg}
+          </span>
+        )}
+      </div>
+
       {loading && <Spinner />}
 
       {!loading && tStats && (

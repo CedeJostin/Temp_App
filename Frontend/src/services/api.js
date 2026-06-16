@@ -50,6 +50,11 @@ export const measurementsApi = {
   statsSummaryTable: (p = {}) =>                                          // ← nuevo
     req(`/measurements/stats/summary-table?${new URLSearchParams(clean(p))}`),
 
+  recalculate: (p = {}) =>                                                // ← recalcular ajuste FDP
+    req(`/measurements/stats/recalculate?${new URLSearchParams(clean(p))}`, {
+      method: 'POST',
+    }),
+
   heatmap: (p = {}) =>
     req(`/measurements/heatmap?${new URLSearchParams(clean(p))}`),
 

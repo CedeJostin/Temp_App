@@ -167,30 +167,68 @@ def _fit_gaussians(fdp: list[dict], n_components: int = 2):
     return gaussians, r2, round(mse, 10), fdp_out, quality
 
 
-def _fit_beta(fdp: list[dict], n_components: int = 2):
-    from scipy.signal import find_peaks
+def _fit_beta(fdp: list[dict], n_components: int = 5):
     from scipy.optimize import minimize
     from scipy.stats import beta as beta_dist
 
-    x_arr  = np.array([d["x"]    for d in fdp])
-    y_real = np.array([d["freq"] for d in fdp])
-    x_norm = x_arr / 100.0
+    x_arr  = np.array([d["x"]    for d in fdp], dtype=float)
+    y_real = np.array([d["freq"] for d in fdp], dtype=float)
+    n      = len(x_arr)
 
-    peaks_idx, _ = find_peaks(y_real, distance=max(1, len(y_real) // (n_components + 1)))
-    if len(peaks_idx) == 0:
-        peaks_idx = np.argsort(y_real)[-n_components:]
-    peaks_idx = sorted(peaks_idx[np.argsort(y_real[peaks_idx])[-n_components:]])
+    # Suavizado leve para estabilizar las derivadas 1ra y 2da
+    if n >= 5:
+        kernel   = np.array([1, 2, 3, 2, 1], dtype=float)
+        kernel  /= kernel.sum()
+        y_smooth = np.convolve(y_real, kernel, mode="same")
+    else:
+        y_smooth = y_real.copy()
 
-    def moda_a_params(moda_n):
+    d2 = np.gradient(np.gradient(y_smooth, x_arr), x_arr)
+
+    # Puntos de cambio de signo de la 2da derivada -> limites A/B de cada pico
+    sign       = np.sign(d2)
+    change_idx = np.where(np.diff(sign) != 0)[0]
+    bound_x    = sorted(set([float(x_arr[0])] + [float(x_arr[i]) for i in change_idx] + [float(x_arr[-1])]))
+
+    # Cada segmento [A, B] entre limites consecutivos es un candidato a curva Beta
+    segments = []
+    for i in range(len(bound_x) - 1):
+        A, B = bound_x[i], bound_x[i + 1]
+        mask = (x_arr >= A) & (x_arr <= B)
+        if not mask.any():
+            continue
+        mass     = float(y_real[mask].sum())
+        peak_idx = int(np.argmax(y_smooth[mask]))
+        moda     = float(x_arr[mask][peak_idx])
+        segments.append({"A": A, "B": B, "mass": mass, "moda": moda})
+
+    # Se conservan los n_components segmentos con mayor masa de datos
+    segments.sort(key=lambda s: s["mass"], reverse=True)
+    segments = segments[:n_components]
+    while len(segments) < n_components:
+        segments.append({"A": 0.0, "B": 100.0, "mass": 0.001, "moda": 50.0})
+    segments.sort(key=lambda s: s["moda"])
+
+    A_arr = np.array([s["A"] for s in segments], dtype=float)
+    B_arr = np.array([s["B"] for s in segments], dtype=float)
+
+    def moda_a_params(moda_n, is_last_saturated):
+        if is_last_saturated:
+            return 4.0, 0.5
         alfa  = max(moda_n * 8 + 1, 1.1)
         beta_ = max((1 - moda_n) * 8 + 1, 1.1)
         return alfa, beta_
 
     p0 = []
-    for idx in peaks_idx:
-        a, b = moda_a_params(float(x_norm[idx]))
+    for i, seg in enumerate(segments):
+        A, B   = seg["A"], seg["B"]
+        moda_n = (seg["moda"] - A) / (B - A) if B > A else 0.5
+        moda_n = min(max(moda_n, 0.01), 0.99)
+        is_last_saturated = (i == n_components - 1) and B >= x_arr[-1] - 1e-6
+        a, b = moda_a_params(moda_n, is_last_saturated)
         p0.extend([a, b])
-    p0.extend([1.0 / n_components] * n_components)
+    total_mass = sum(s["mass"] for s in segments) or 1.0
+    p0.extend([max(s["mass"] / total_mass, 0.01) for s in segments])
     p0 = np.array(p0, dtype=float)
 
     def beta_sum(x, params):
@@ -199,14 +237,15 @@ def _fit_beta(fdp: list[dict], n_components: int = 2):
             alfa  = max(params[2*i],   1.001)
             beta_ = max(params[2*i+1], 1.001)
             w     = params[2*n_components + i]
-            result += w * beta_dist.pdf(x, alfa, beta_) / 100.0
+            A, B  = A_arr[i], B_arr[i]
+            result += w * beta_dist.pdf(x, alfa, beta_, loc=A, scale=B - A)
         return result
 
     def cost(params):
-        return float(np.sqrt(np.mean((y_real - beta_sum(x_norm, params)) ** 2)))
+        return float(np.sqrt(np.mean((y_real - beta_sum(x_arr, params)) ** 2)))
 
     constraints = [{"type": "eq", "fun": lambda p: 1.0 - sum(p[2*n_components:])}]
-    bounds = [(1.001, 100)] * (2*n_components) + [(0.01, 1.0)] * n_components
+    bounds = [(1.001, 50)] * (2*n_components) + [(0.0, 1.0)] * n_components
 
     try:
         result = minimize(cost, p0, method="SLSQP", bounds=bounds,
@@ -220,17 +259,20 @@ def _fit_beta(fdp: list[dict], n_components: int = 2):
         alfa  = float(max(params[2*i],   1.001))
         beta_ = float(max(params[2*i+1], 1.001))
         w     = float(params[2*n_components+i])
-        mode  = (alfa - 1) / (alfa + beta_ - 2) * 100 if alfa > 1 and beta_ > 1 else 0
-        var   = alfa * beta_ / ((alfa + beta_)**2 * (alfa + beta_ + 1)) * 10000
+        A, B  = float(A_arr[i]), float(B_arr[i])
+        mode  = A + (alfa - 1) / (alfa + beta_ - 2) * (B - A) if alfa > 1 and beta_ > 1 else A
+        var   = alfa * beta_ / ((alfa + beta_)**2 * (alfa + beta_ + 1)) * (B - A)**2
         betas.append({
             "alpha":    round(alfa,  4),
             "beta":     round(beta_, 4),
             "w":        round(w,     4),
             "mode":     round(mode,  2),
             "variance": round(var,   4),
+            "A":        round(A, 2),
+            "B":        round(B, 2),
         })
 
-    y_model = beta_sum(x_norm, params)
+    y_model = beta_sum(x_arr, params)
     mse     = float(np.mean((y_real - y_model) ** 2))
     y_mean  = float(np.mean(y_real))
     ss_tot  = float(np.sum((y_real - y_mean) ** 2))
@@ -531,7 +573,7 @@ def _analizar_variable(df: pd.DataFrame, variable: str, n_components: int) -> di
     elif is_hr:
         vals_hr = values[(values >= 0) & (values <= 100)]
         fdp_hr  = _fdp(vals_hr, 1.0)
-        betas, r2, mse, fdp_out, quality = _fit_beta(fdp_hr, n_components)
+        betas, r2, mse, fdp_out, quality = _fit_beta(fdp_hr, 5)
         result = {
             "variable":   variable,
             "tipo_curva": "beta",
