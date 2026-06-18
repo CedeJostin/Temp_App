@@ -1,0 +1,6 @@
+# Tooling del asistente de IA (skills de terceros, instalables vía npx).
+# No forma parte de la aplicación; se reinstala con los comandos `npx ... --skill ...`.
+.claude/
+.agents/
+.codex/
+skills-lock.json

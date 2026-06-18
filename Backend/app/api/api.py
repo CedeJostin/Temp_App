@@ -4,7 +4,8 @@ from app.api.routes import (
     stations,
     uploads,
     measurements,
-    analysis, 
+    charts,
+    analysis,
     local_analysis
 )
 
@@ -20,6 +21,14 @@ api_router.include_router(
     uploads.router,
     prefix="/uploads",
     tags=["Uploads"]
+)
+
+# charts va ANTES que measurements: sus rutas específicas (/stats, /heatmap, …)
+# deben registrarse antes del catch-all GET /{measurement_id} de measurements.
+api_router.include_router(
+    charts.router,
+    prefix="/measurements",
+    tags=["Charts"]
 )
 
 api_router.include_router(

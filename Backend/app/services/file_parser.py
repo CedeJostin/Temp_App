@@ -14,8 +14,12 @@ Soporta:
 """
 
 import io
+import logging
+
 import pandas as pd
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 # ── helpers ──────────────────────────────────────────────────────────
@@ -57,7 +61,7 @@ def _detect_hour_cols(df: pd.DataFrame):
         def _skc(c):
             v = str(c).replace(":00:00","").replace(":00","")
             try: return int(v)
-            except: return 99
+            except (ValueError, TypeError): return 99
         found_c.sort(key=_skc)
         return found_c, "C"
 
@@ -68,7 +72,7 @@ def _detect_hour_cols(df: pd.DataFrame):
         def _sk(c):
             v = str(c).replace(":00:00","").replace(":00","")
             try: return int(v)
-            except: return 99
+            except (ValueError, TypeError): return 99
         found_b.sort(key=_sk)
         return found_b, "B"
 
@@ -89,8 +93,8 @@ def _wide_to_long(df: pd.DataFrame, value_col: str) -> pd.DataFrame | None:
     hour_cols, fmt = _detect_hour_cols(df)
 
     # ── DIAGNÓSTICO 1 ──
-    print(f"🔍 _detect_hour_cols: {len(hour_cols)} cols, fmt={fmt}")
-    print(f"🔍 Columnas df (primeras 10): {list(df.columns[:10])}")
+    logger.debug(f"🔍 _detect_hour_cols: {len(hour_cols)} cols, fmt={fmt}")
+    logger.debug(f"🔍 Columnas df (primeras 10): {list(df.columns[:10])}")
 
     if not hour_cols:
         return None
@@ -99,7 +103,7 @@ def _wide_to_long(df: pd.DataFrame, value_col: str) -> pd.DataFrame | None:
 
     # ── DIAGNÓSTICO 2 ──
     tiene_fecha = all(c in df.columns for c in ["_year", "_month", "_day"])
-    print(f"🔍 Tiene _year/_month/_day: {tiene_fecha}, columnas: {[c for c in df.columns if c.startswith('_')]}")
+    logger.debug(f"🔍 Tiene _year/_month/_day: {tiene_fecha}, columnas: {[c for c in df.columns if c.startswith('_')]}")
 
     if not tiene_fecha:
         return None
@@ -109,7 +113,7 @@ def _wide_to_long(df: pd.DataFrame, value_col: str) -> pd.DataFrame | None:
 
     antes = len(df)
     df = df.dropna(subset=["_year","_month","_day"]).copy()
-    print(f"🔍 Filas antes/después dropna fechas: {antes} → {len(df)}")
+    logger.debug(f"🔍 Filas antes/después dropna fechas: {antes} → {len(df)}")
 
     df[["_year","_month","_day"]] = df[["_year","_month","_day"]].astype(int)
 
@@ -119,12 +123,12 @@ def _wide_to_long(df: pd.DataFrame, value_col: str) -> pd.DataFrame | None:
         var_name="_hora_str",
         value_name=value_col
     )
-    print(f"🔍 Después de melt: {len(melted):,} filas")
+    logger.debug(f"🔍 Después de melt: {len(melted):,} filas")
 
     melted[value_col] = _to_float(melted[value_col])
 
     nulos_valor = melted[value_col].isna().sum()
-    print(f"🔍 Nulos en value después de _to_float: {nulos_valor:,} / {len(melted):,}")
+    logger.debug(f"🔍 Nulos en value después de _to_float: {nulos_valor:,} / {len(melted):,}")
 
     def _hora_num(s):
         s = str(s).strip().upper()
@@ -145,7 +149,7 @@ def _wide_to_long(df: pd.DataFrame, value_col: str) -> pd.DataFrame | None:
                              + pd.to_timedelta(extra_day, "d"))
 
     nulos_fecha = melted["measured_at"].isna().sum()
-    print(f"🔍 Nulos en measured_at: {nulos_fecha:,}")
+    logger.debug(f"🔍 Nulos en measured_at: {nulos_fecha:,}")
 
     result = (melted[["measured_at", value_col]]
               .rename(columns={value_col: "value"})
@@ -156,7 +160,7 @@ def _wide_to_long(df: pd.DataFrame, value_col: str) -> pd.DataFrame | None:
               .reset_index(drop=True))
 
     # ── DIAGNÓSTICO 3 ──
-    print(f"🔍 _wide_to_long result: {len(result):,} filas, "
+    logger.debug(f"🔍 _wide_to_long result: {len(result):,} filas, "
           f"rango {result['measured_at'].min()} → {result['measured_at'].max()}")
 
     return result
@@ -199,7 +203,7 @@ def _parse_formato_c(
     var_text = raw_lines[2] if len(raw_lines) > 2 else ""
     vtype    = _detect_variable(var_text, filename)
 
-    print(f"🔍 _parse_formato_c: enc={enc}, sep='{sep}', vtype={vtype}")
+    logger.debug(f"🔍 _parse_formato_c: enc={enc}, sep='{sep}', vtype={vtype}")
 
     try:
         df = pd.read_csv(
@@ -217,9 +221,9 @@ def _parse_formato_c(
     df = df.loc[:, ~df.columns.str.startswith("Unnamed")]
     df.columns = [str(c).strip() for c in df.columns]
 
-    print(f"🔍 Formato C df shape: {df.shape}")
-    print(f"🔍 Columnas: {list(df.columns)}")
-    print(f"🔍 Primeras 2 filas:\n{df.head(2).to_string()}")
+    logger.debug(f"🔍 Formato C df shape: {df.shape}")
+    logger.debug(f"🔍 Columnas: {list(df.columns)}")
+    logger.debug(f"🔍 Primeras 2 filas:\n{df.head(2).to_string()}")
 
     parsed = _wide_to_long(df, vtype)
     if parsed is None or parsed.empty:
@@ -315,7 +319,7 @@ def parse_file(
     logs: list[str] = []
     ext = filename.lower()
 
-    print(f"🔍 parse_file: {filename}, {len(file_bytes):,} bytes")
+    logger.debug(f"🔍 parse_file: {filename}, {len(file_bytes):,} bytes")
 
     if ext.endswith(".csv"):
         return _parse_csv(file_bytes, filename, logs)
@@ -338,10 +342,10 @@ def _parse_csv(
             raw_lines = raw_text.splitlines()
             csv_sep   = _find_csv_sep(raw_text) or ";"
 
-            print(f"🔍 _parse_csv: enc={enc}, sep='{csv_sep}', líneas={len(raw_lines)}")
+            logger.debug(f"🔍 _parse_csv: enc={enc}, sep='{csv_sep}', líneas={len(raw_lines)}")
 
             if _detect_formato_c(raw_lines, csv_sep):
-                print(f"🔍 Detectado Formato C")
+                logger.debug(f"🔍 Detectado Formato C")
                 df_c, vtype_c, _ = _parse_formato_c(
                     file_bytes, filename, enc, [], sep=csv_sep
                 )
@@ -366,7 +370,7 @@ def _parse_csv(
             df_a = _try_read_csv(file_bytes, enc, csv_sep, 0)
             _, fmt_a = _detect_hour_cols(df_a) if not df_a.empty else ([], "UNKNOWN")
 
-            print(f"🔍 fmt_b={fmt_b}, fmt_a={fmt_a}")
+            logger.debug(f"🔍 fmt_b={fmt_b}, fmt_a={fmt_a}")
 
             if fmt_b in ("A", "B", "C"):
                 df_use = df_b

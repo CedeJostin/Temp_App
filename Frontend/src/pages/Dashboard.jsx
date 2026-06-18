@@ -1,16 +1,17 @@
 import { useState, useEffect } from "react"
 import { useFetch } from "../hooks/useFetch"
 import { stationsApi, measurementsApi } from "../services/api"
+import { Thermometer, Droplets, CloudSun, Wind } from "lucide-react"
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid,
-  Tooltip, ResponsiveContainer, Legend
+  Tooltip, ResponsiveContainer,
 } from "recharts"
 
 const VARIABLES = [
-  { code: "TEMP",   label: "Temperatura",  unit: "°C",   color: "#ef4444", icon: "🌡️" },
-  { code: "HR",     label: "Humedad",      unit: "%",    color: "#3b82f6", icon: "💧" },
-  { code: "RAD",    label: "Radiación",    unit: "W/m²", color: "#f59e0b", icon: "⚡" },
-  { code: "VIENTO", label: "Viento",       unit: "m/s",  color: "#22c55e", icon: "💨" },
+  { code: "TEMP",   label: "Temperatura",  unit: "°C",   color: "#ef4444", Icon: Thermometer },
+  { code: "HR",     label: "Humedad",      unit: "%",    color: "#3b82f6", Icon: Droplets },
+  { code: "RAD",    label: "Radiación",    unit: "W/m²", color: "#f59e0b", Icon: CloudSun },
+  { code: "VIENTO", label: "Viento",       unit: "m/s",  color: "#22c55e", Icon: Wind },
 ]
 
 const GROUP_OPTIONS = [
@@ -21,34 +22,32 @@ const GROUP_OPTIONS = [
 
 function SummaryCard({ variable, summary }) {
   const s = summary?.find(r => r.variable_code === variable.code)
+  const { Icon } = variable
   return (
-    <div style={{
-      background: "var(--surface)", border: `1px solid ${variable.color}40`,
-      borderTop: `3px solid ${variable.color}`,
-      borderRadius: 12, padding: "16px 20px",
-    }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-        <span style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", color: "var(--text-muted)", letterSpacing: "0.05em" }}>
-          {variable.label}
-        </span>
-        <span style={{ fontSize: 18 }}>{variable.icon}</span>
+    <div className="stat-card" style={{ "--stat-accent": variable.color, alignItems: "flex-start" }}>
+      <div className="stat-card__body" style={{ flex: 1 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span className="stat-card__label">{variable.label}</span>
+          <span className="stat-card__icon"><Icon size={18} /></span>
+        </div>
+        {s ? (
+          <>
+            <p className="stat-card__value">
+              {s.avg?.toFixed(1)}
+              <span className="stat-card__unit"> {variable.unit}</span>
+            </p>
+            <div className="num" style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 6, lineHeight: 1.7 }}>
+              <span>Máx {s.max?.toFixed(1)} {variable.unit}</span>
+              <span style={{ margin: "0 8px", color: "var(--text-faint)" }}>·</span>
+              <span>Mín {s.min?.toFixed(1)} {variable.unit}</span>
+              <br />
+              <span>{s.count?.toLocaleString()} mediciones</span>
+            </div>
+          </>
+        ) : (
+          <p style={{ fontSize: 13, color: "var(--text-muted)", marginTop: 8 }}>Sin datos</p>
+        )}
       </div>
-      {s ? (
-        <>
-          <div style={{ fontSize: 28, fontWeight: 800, color: variable.color }}>
-            {s.avg?.toFixed(1)} <span style={{ fontSize: 14, fontWeight: 400, color: "var(--text-muted)" }}>{variable.unit}</span>
-          </div>
-          <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 6, lineHeight: 1.8 }}>
-            <span>↑ {s.max?.toFixed(1)} {variable.unit}</span>
-            <span style={{ margin: "0 8px" }}>·</span>
-            <span>↓ {s.min?.toFixed(1)} {variable.unit}</span>
-            <br />
-            <span>{s.count?.toLocaleString()} mediciones</span>
-          </div>
-        </>
-      ) : (
-        <div style={{ fontSize: 13, color: "var(--text-muted)", marginTop: 8 }}>— Sin datos</div>
-      )}
     </div>
   )
 }
@@ -56,6 +55,7 @@ function SummaryCard({ variable, summary }) {
 function VariableChart({ stationId, variable, groupBy }) {
   const [data, setData] = useState([])
   const [loading, setLoading] = useState(false)
+  const { Icon } = variable
 
   useEffect(() => {
     if (!stationId) return
@@ -73,12 +73,9 @@ function VariableChart({ stationId, variable, groupBy }) {
   }
 
   return (
-    <div style={{
-      background: "var(--surface)", border: "1px solid var(--border)",
-      borderRadius: 12, padding: "16px 20px",
-    }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
-        <span>{variable.icon}</span>
+    <div className="card">
+      <div className="chart-card__header">
+        <span style={{ color: variable.color, display: "inline-flex" }}><Icon size={16} /></span>
         <span style={{ fontWeight: 600 }}>{variable.label}</span>
         <span style={{ fontSize: 12, color: "var(--text-muted)" }}>{variable.unit}</span>
       </div>
@@ -128,50 +125,42 @@ export default function Dashboard() {
 
   return (
     <div className="page">
-      <header className="page__header" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
+      <header className="page__header">
         <div>
           <h1 className="page__title">Dashboard</h1>
           <p className="page__subtitle">Resumen de mediciones ambientales</p>
         </div>
-        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-          <div>
-            <label style={{ fontSize: 11, fontWeight: 600, textTransform: "uppercase", color: "var(--text-muted)", display: "block", marginBottom: 3 }}>Estación</label>
-            <select
-              value={stationId}
-              onChange={e => setStationId(e.target.value)}
-              style={{ padding: "6px 12px", borderRadius: 8, border: "1px solid var(--border)", background: "var(--surface)", color: "var(--text)", fontSize: 13 }}
-            >
+        <div className="page__controls">
+          <label className="field">
+            <span className="field__label">Estación</span>
+            <select className="field__select" value={stationId} onChange={e => setStationId(e.target.value)}>
               <option value="">Seleccionar…</option>
               {stationList.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
             </select>
-          </div>
-          <div>
-            <label style={{ fontSize: 11, fontWeight: 600, textTransform: "uppercase", color: "var(--text-muted)", display: "block", marginBottom: 3 }}>Agrupación</label>
-            <select
-              value={groupBy}
-              onChange={e => setGroupBy(e.target.value)}
-              style={{ padding: "6px 12px", borderRadius: 8, border: "1px solid var(--border)", background: "var(--surface)", color: "var(--text)", fontSize: 13 }}
-            >
+          </label>
+          <label className="field">
+            <span className="field__label">Agrupación</span>
+            <select className="field__select" value={groupBy} onChange={e => setGroupBy(e.target.value)}>
               {GROUP_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
             </select>
-          </div>
+          </label>
         </div>
       </header>
 
       {!stationId ? (
-        <div style={{ textAlign: "center", padding: "4rem 0", color: "var(--text-muted)" }}>
-          <div style={{ fontSize: 48, marginBottom: 12 }}>🌤️</div>
+        <div className="empty-state">
+          <span className="empty-state__icon"><CloudSun size={44} /></span>
           <p>Seleccioná una estación para ver el resumen.</p>
         </div>
       ) : (
         <>
           {/* Tarjetas resumen */}
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 14, marginBottom: 24 }}>
+          <div className="stats-grid">
             {VARIABLES.map(v => <SummaryCard key={v.code} variable={v} summary={summary} />)}
           </div>
 
           {/* Gráficos */}
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(400px, 1fr))", gap: 16 }}>
+          <div className="charts-grid">
             {VARIABLES.map(v => (
               <VariableChart key={v.code} stationId={stationId} variable={v} groupBy={groupBy} />
             ))}

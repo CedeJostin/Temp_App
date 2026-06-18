@@ -11,6 +11,7 @@ Flujo completo:
   5. Retorna resumen del proceso
 """
 
+import logging
 from typing import Optional
 
 from fastapi import (
@@ -31,6 +32,8 @@ from app.services.file_parser import parse_file
 from app.services.measurement_service import insert_measurements
 
 router = APIRouter()
+
+logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -154,11 +157,11 @@ async def upload_file(
     
     try:
         # Diagnóstico — borrar después
-        print(f"🔍 DF shape: {df.shape}")
-        print(f"🔍 Primeras filas:\n{df.head()}")
-        print(f"🔍 Últimas filas:\n{df.tail()}")
-        print(f"🔍 Rango fechas: {df['measured_at'].min()} → {df['measured_at'].max()}")
-        print(f"🔍 Nulos en value: {df['value'].isna().sum()}")
+        logger.debug(f"🔍 DF shape: {df.shape}")
+        logger.debug(f"🔍 Primeras filas:\n{df.head()}")
+        logger.debug(f"🔍 Últimas filas:\n{df.tail()}")
+        logger.debug(f"🔍 Rango fechas: {df['measured_at'].min()} → {df['measured_at'].max()}")
+        logger.debug(f"🔍 Nulos en value: {df['value'].isna().sum()}")
         rows_inserted = insert_measurements(
             db=db,
             df=df,

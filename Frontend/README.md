@@ -1,18 +1,73 @@
-# React + Vite
+# Frontend — Análisis Meteorológico
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Interfaz web (SPA) en **React 19 + Vite** para cargar archivos, explorar
+mediciones y visualizar el análisis estadístico que expone el
+[backend](../Backend/README.md).
 
-Currently, two official plugins are available:
+## Stack
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+| Área         | Tecnología                                  |
+|--------------|---------------------------------------------|
+| UI           | React 19                                    |
+| Bundler/dev  | Vite 8                                       |
+| Routing      | React Router 7                              |
+| Estilos      | TailwindCSS 4                               |
+| Gráficas     | Recharts · Plotly.js · D3                   |
+| Iconos       | lucide-react                                |
+| Carga archivos | react-dropzone                            |
 
-## React Compiler
+El cliente HTTP vive en [`src/services/api.js`](src/services/api.js) y usa `fetch`.
 
-The React Compiler is enabled on this template. See [this documentation](https://react.dev/learn/react-compiler) for more information.
+## Requisitos
 
-Note: This will impact Vite dev & build performances.
+- Node.js 18+
+- El [backend](../Backend/README.md) corriendo (por defecto en `http://localhost:8000`).
 
-## Expanding the ESLint configuration
+## Puesta en marcha
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+```bash
+npm install
+npm run dev          # arranca en http://localhost:5173
+```
+
+## Scripts
+
+| Comando           | Descripción                          |
+|-------------------|--------------------------------------|
+| `npm run dev`     | Servidor de desarrollo con HMR       |
+| `npm run build`   | Build de producción en `dist/`       |
+| `npm run preview` | Sirve el build de producción         |
+| `npm run lint`    | Linter (ESLint)                      |
+
+## Configuración
+
+La URL base de la API se toma de la variable de entorno `VITE_API_URL`
+(con fallback a `http://localhost:8000/api`). Para apuntar a otro backend,
+crea un archivo `.env` en `Frontend/`:
+
+```
+VITE_API_URL=http://mi-servidor:8000/api
+```
+
+> El backend solo permite CORS desde los orígenes definidos en su `CORS_ORIGINS`
+> (por defecto `http://localhost:5173`). Si cambias el puerto del frontend,
+> actualiza también esa variable en el backend.
+
+## Estructura y rutas
+
+```
+src/
+├── App.jsx              # Define el enrutado
+├── components/layout/   # Sidebar y layout
+├── pages/               # Una vista por ruta
+└── services/api.js      # Llamadas a la API del backend
+```
+
+| Ruta             | Página         | Descripción                              |
+|------------------|----------------|------------------------------------------|
+| `/`              | Dashboard      | Resumen y series por estación            |
+| `/upload`        | Upload         | Carga de archivos CSV/Excel              |
+| `/stations`      | Stations       | Gestión de estaciones                    |
+| `/measurements`  | Measurements   | Exploración de mediciones                |
+| `/analysis`      | Analysis       | FDP, mapas de calor, perfiles, combinado |
+| `/Dataanalysis`  | Dataanalysis   | Análisis local (sin persistir en BD)     |

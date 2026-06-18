@@ -1,32 +1,38 @@
 import { useState, useEffect, useCallback } from "react"
 import { stationsApi } from "../services/api"
+import {
+  Thermometer, Droplets, BarChart3, Loader2, AlertTriangle, CircleCheckBig,
+  ChevronLeft, ChevronRight, ChevronDown,
+} from "lucide-react"
 
-// ─── Colores de banda ────────────────────────────────────────
+const SPIN = { animation: "spin 0.8s linear infinite" }
+
+// ─── Colores de banda (variantes oscuras translúcidas) ───────
 const BAND_COLORS = {
-  green:  { bg: "#dcfce7", border: "#16a34a", text: "#15803d" },
-  blue:   { bg: "#dbeafe", border: "#2563eb", text: "#1d4ed8" },
-  yellow: { bg: "#fef9c3", border: "#ca8a04", text: "#a16207" },
-  orange: { bg: "#ffedd5", border: "#ea580c", text: "#c2410c" },
-  red:    { bg: "#fee2e2", border: "#dc2626", text: "#b91c1c" },
+  green:  { bg: "rgba(34,197,94,0.14)",  border: "#22c55e", text: "#4ade80" },
+  blue:   { bg: "rgba(59,130,246,0.14)", border: "#3b82f6", text: "#60a5fa" },
+  yellow: { bg: "rgba(234,179,8,0.14)",  border: "#eab308", text: "#facc15" },
+  orange: { bg: "rgba(249,115,22,0.14)", border: "#f97316", text: "#fb923c" },
+  red:    { bg: "rgba(239,68,68,0.14)",  border: "#ef4444", text: "#f87171" },
 }
 
 const VAR_META = {
-  temp: { label: "Temperatura",     unit: "°C", icon: "🌡️", color: "#ef4444" },
-  hr:   { label: "Humedad Relativa", unit: "%",  icon: "💧", color: "#3b82f6" },
+  temp: { label: "Temperatura",      unit: "°C", Icon: Thermometer, color: "#ef4444" },
+  hr:   { label: "Humedad Relativa", unit: "%",  Icon: Droplets,    color: "#3b82f6" },
 }
 
 // ─── Helpers ─────────────────────────────────────────────────
 function StatBox({ label, value, unit = "" }) {
   return (
     <div style={{
-      background: "var(--surface)", border: "1px solid var(--border)",
-      borderRadius: 10, padding: "12px 16px", textAlign: "center",
+      background: "var(--bg2)", border: "1px solid var(--border)",
+      borderRadius: "var(--radius)", padding: "12px 16px", textAlign: "center",
     }}>
       <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase",
         letterSpacing: "0.07em", color: "var(--text-muted)", marginBottom: 4 }}>
         {label}
       </div>
-      <div style={{ fontSize: 22, fontWeight: 800, color: "var(--text)", lineHeight: 1 }}>
+      <div className="num" style={{ fontSize: 22, fontWeight: 600, color: "var(--text)", lineHeight: 1 }}>
         {value !== undefined && value !== null ? value : "—"}
         {value !== undefined && value !== null && unit && (
           <span style={{ fontSize: 12, fontWeight: 400, color: "var(--text-muted)", marginLeft: 2 }}>
@@ -41,9 +47,9 @@ function StatBox({ label, value, unit = "" }) {
 function CompletenessChip({ band, pct }) {
   const c = BAND_COLORS[band?.color] ?? BAND_COLORS.red
   return (
-    <span style={{
+    <span className="num" style={{
       background: c.bg, border: `1px solid ${c.border}`,
-      color: c.text, borderRadius: 20, padding: "3px 12px",
+      color: c.text, borderRadius: "var(--radius-pill)", padding: "3px 12px",
       fontSize: 12, fontWeight: 700, display: "inline-flex", alignItems: "center", gap: 5,
     }}>
       <span style={{ width: 8, height: 8, borderRadius: "50%", background: c.border, display: "inline-block" }} />
@@ -54,34 +60,31 @@ function CompletenessChip({ band, pct }) {
 
 function GapsTable({ gaps }) {
   if (!gaps?.length) return (
-    <div style={{ color: "#16a34a", fontSize: 13, padding: "8px 0", display: "flex", alignItems: "center", gap: 6 }}>
-      <span>✅</span> Sin huecos continuos mayores a 5 días. Los datos faltantes pueden considerarse aleatorios.
+    <div style={{ color: "#4ade80", fontSize: 13, padding: "8px 0", display: "flex", alignItems: "center", gap: 6 }}>
+      <CircleCheckBig size={16} /> Sin huecos continuos mayores a 5 días. Los datos faltantes pueden considerarse aleatorios.
     </div>
   )
   return (
     <div>
-      <div style={{ color: "#dc2626", fontSize: 13, marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
-        <span>⚠️</span> Se detectaron <strong>{gaps.length}</strong> hueco(s) continuos mayores a 5 días:
+      <div style={{ color: "#f87171", fontSize: 13, marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
+        <AlertTriangle size={16} /> Se detectaron <strong>{gaps.length}</strong> hueco(s) continuos mayores a 5 días:
       </div>
-      <div style={{ overflowX: "auto" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+      <div className="table-wrap">
+        <table className="table" style={{ fontSize: 12 }}>
           <thead>
-            <tr style={{ background: "var(--surface-alt, #f8fafc)" }}>
+            <tr>
               {["#", "Inicio", "Fin", "Días"].map(h => (
-                <th key={h} style={{ padding: "6px 10px", textAlign: "left",
-                  borderBottom: "1px solid var(--border)", fontWeight: 700,
-                  color: "var(--text-muted)", letterSpacing: "0.05em", fontSize: 10,
-                  textTransform: "uppercase" }}>{h}</th>
+                <th key={h}>{h}</th>
               ))}
             </tr>
           </thead>
           <tbody>
             {gaps.map((g, i) => (
-              <tr key={i} style={{ borderBottom: "1px solid var(--border)" }}>
-                <td style={{ padding: "5px 10px", color: "var(--text-muted)" }}>{i + 1}</td>
-                <td style={{ padding: "5px 10px", fontFamily: "monospace" }}>{g.start?.slice(0, 16).replace("T", " ")}</td>
-                <td style={{ padding: "5px 10px", fontFamily: "monospace" }}>{g.end?.slice(0, 16).replace("T", " ")}</td>
-                <td style={{ padding: "5px 10px", fontWeight: 700, color: "#dc2626" }}>{g.days}</td>
+              <tr key={i}>
+                <td style={{ color: "var(--text-muted)" }}>{i + 1}</td>
+                <td className="num">{g.start?.slice(0, 16).replace("T", " ")}</td>
+                <td className="num">{g.end?.slice(0, 16).replace("T", " ")}</td>
+                <td className="num" style={{ fontWeight: 700, color: "#f87171" }}>{g.days}</td>
               </tr>
             ))}
           </tbody>
@@ -116,7 +119,7 @@ function BoxplotViz({ stats, color, unit }) {
         <div style={{
           position: "absolute", top: "50%", transform: "translate(-50%, -50%)",
           left: pct(mean), width: 8, height: 8, borderRadius: "50%",
-          background: color, border: "2px solid white",
+          background: color, border: "2px solid var(--surface)",
           boxShadow: "0 0 0 1px " + color,
         }} title={`Media: ${mean} ${unit}`} />
         {/* Whiskers izquierdo */}
@@ -124,12 +127,12 @@ function BoxplotViz({ stats, color, unit }) {
         {/* Whiskers derecho */}
         <div style={{ position: "absolute", top: "50%", left: pct(q75), right: "0%", height: 2, background: color + "88", transform: "translateY(-50%)" }} />
       </div>
-      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--text-muted)", marginTop: 4 }}>
-        <span>↓ {min} {unit}</span>
+      <div className="num" style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--text-muted)", marginTop: 4 }}>
+        <span>mín {min} {unit}</span>
         <span>Q25 {q25}</span>
         <span>Mediana {q50}</span>
         <span>Q75 {q75}</span>
-        <span>↑ {max} {unit}</span>
+        <span>máx {max} {unit}</span>
       </div>
     </div>
   )
@@ -145,51 +148,45 @@ function RawDataTable({ data, unit }) {
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-        <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
+        <span className="num" style={{ fontSize: 12, color: "var(--text-muted)" }}>
           {total.toLocaleString()} registros depurados
         </span>
-        <div style={{ display: "flex", gap: 6, fontSize: 12 }}>
+        <div style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12 }}>
           <button
+            className="icon-btn"
             onClick={() => setPage(p => Math.max(0, p - 1))}
             disabled={page === 0}
-            style={{ padding: "3px 10px", borderRadius: 6, border: "1px solid var(--border)",
-              background: "var(--surface)", cursor: page === 0 ? "default" : "pointer",
-              opacity: page === 0 ? 0.4 : 1 }}
-          >‹</button>
-          <span style={{ padding: "3px 8px", color: "var(--text-muted)" }}>
+            aria-label="Página anterior"
+          ><ChevronLeft size={16} /></button>
+          <span className="num" style={{ padding: "3px 8px", color: "var(--text-muted)" }}>
             {page + 1} / {totalPages}
           </span>
           <button
+            className="icon-btn"
             onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))}
             disabled={page >= totalPages - 1}
-            style={{ padding: "3px 10px", borderRadius: 6, border: "1px solid var(--border)",
-              background: "var(--surface)", cursor: "pointer",
-              opacity: page >= totalPages - 1 ? 0.4 : 1 }}
-          >›</button>
+            aria-label="Página siguiente"
+          ><ChevronRight size={16} /></button>
         </div>
       </div>
-      <div style={{ overflowX: "auto" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+      <div className="table-wrap">
+        <table className="table num" style={{ fontSize: 12 }}>
           <thead>
-            <tr style={{ background: "var(--surface-alt, #f8fafc)" }}>
+            <tr>
               {["#", "Año", "Mes", "Día", "Hora", `Valor (${unit})`].map(h => (
-                <th key={h} style={{ padding: "6px 12px", textAlign: "right",
-                  borderBottom: "1px solid var(--border)", fontWeight: 700,
-                  color: "var(--text-muted)", fontSize: 10, textTransform: "uppercase",
-                  letterSpacing: "0.06em", whiteSpace: "nowrap" }}>{h}</th>
+                <th key={h} style={{ textAlign: "right", whiteSpace: "nowrap" }}>{h}</th>
               ))}
             </tr>
           </thead>
           <tbody>
             {slice.map((r, i) => (
-              <tr key={i} style={{ borderBottom: "1px solid var(--border)",
-                background: i % 2 === 0 ? "transparent" : "var(--surface-alt, #f9fafb)" }}>
-                <td style={{ padding: "4px 12px", textAlign: "right", color: "var(--text-muted)", fontFamily: "monospace" }}>{r.n}</td>
-                <td style={{ padding: "4px 12px", textAlign: "right" }}>{r.year}</td>
-                <td style={{ padding: "4px 12px", textAlign: "right" }}>{r.month}</td>
-                <td style={{ padding: "4px 12px", textAlign: "right" }}>{r.day}</td>
-                <td style={{ padding: "4px 12px", textAlign: "right", color: "var(--text-muted)" }}>{String(r.hour).padStart(2, "0")}:00</td>
-                <td style={{ padding: "4px 12px", textAlign: "right", fontWeight: 600 }}>{r.value}</td>
+              <tr key={i}>
+                <td style={{ textAlign: "right", color: "var(--text-muted)" }}>{r.n}</td>
+                <td style={{ textAlign: "right" }}>{r.year}</td>
+                <td style={{ textAlign: "right" }}>{r.month}</td>
+                <td style={{ textAlign: "right" }}>{r.day}</td>
+                <td style={{ textAlign: "right", color: "var(--text-muted)" }}>{String(r.hour).padStart(2, "0")}:00</td>
+                <td style={{ textAlign: "right", fontWeight: 600 }}>{r.value}</td>
               </tr>
             ))}
           </tbody>
@@ -203,6 +200,7 @@ function RawDataTable({ data, unit }) {
 function VariablePanel({ varKey, varData }) {
   const [showRaw, setShowRaw] = useState(false)
   const meta = VAR_META[varKey]
+  const MetaIcon = meta.Icon
 
   if (!varData || varData.status === "no_data") {
     return (
@@ -218,11 +216,11 @@ function VariablePanel({ varKey, varData }) {
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       {/* Header */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <span style={{ fontSize: 28 }}>{meta.icon}</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <span style={{ color: meta.color, display: "inline-flex" }}><MetaIcon size={26} /></span>
           <div>
-            <div style={{ fontWeight: 800, fontSize: 18 }}>{meta.label}</div>
-            <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
+            <div style={{ fontWeight: 700, fontSize: 18 }}>{meta.label}</div>
+            <div className="num" style={{ fontSize: 12, color: "var(--text-muted)" }}>
               {date_start?.slice(0, 10)} → {date_end?.slice(0, 10)}
             </div>
           </div>
@@ -270,14 +268,10 @@ function VariablePanel({ varKey, varData }) {
       <div>
         <button
           onClick={() => setShowRaw(v => !v)}
-          style={{
-            display: "flex", alignItems: "center", gap: 6,
-            padding: "6px 14px", borderRadius: 8, border: "1px solid var(--border)",
-            background: "var(--surface)", cursor: "pointer", fontSize: 12, fontWeight: 600,
-            color: "var(--text)",
-          }}
+          className="btn btn--ghost"
+          style={{ fontSize: 12 }}
         >
-          {showRaw ? "▾" : "▸"} Datos primarios crudos depurados
+          {showRaw ? <ChevronDown size={15} /> : <ChevronRight size={15} />} Datos primarios crudos depurados
         </button>
         {showRaw && (
           <div style={{ marginTop: 12 }}>
@@ -327,91 +321,59 @@ export default function DataAnalysis() {
   return (
     <div className="page">
       {/* Header */}
-      <header className="page__header" style={{ marginBottom: 20 }}>
-        <h1 className="page__title">Análisis de Calidad de Datos</h1>
-        <p className="page__subtitle">Depuración, completitud y estadísticos — T y HR por estación</p>
+      <header className="page__header">
+        <div>
+          <h1 className="page__title">Análisis de Calidad de Datos</h1>
+          <p className="page__subtitle">Depuración, completitud y estadísticos — T y HR por estación</p>
+        </div>
       </header>
 
       {/* Filtros */}
-      <div style={{
-        background: "var(--surface)", border: "1px solid var(--border)",
-        borderRadius: 12, padding: "16px 20px", marginBottom: 20,
-        display: "flex", gap: 14, flexWrap: "wrap", alignItems: "flex-end",
-      }}>
-        <div>
-          <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase",
-            color: "var(--text-muted)", display: "block", marginBottom: 3 }}>
-            Estación
-          </label>
-          <select
-            value={stationId}
-            onChange={e => setStationId(e.target.value)}
-            style={{ padding: "7px 12px", borderRadius: 8, border: "1px solid var(--border)",
-              background: "var(--surface)", color: "var(--text)", fontSize: 13, minWidth: 180 }}
-          >
+      <div className="card" style={{ display: "flex", gap: 14, flexWrap: "wrap", alignItems: "flex-end" }}>
+        <label className="field">
+          <span className="field__label">Estación</span>
+          <select className="field__select" value={stationId} onChange={e => setStationId(e.target.value)} style={{ minWidth: 180 }}>
             <option value="">Seleccionar…</option>
             {stations.map(s => (
               <option key={s.id} value={s.id}>{s.name}</option>
             ))}
           </select>
-        </div>
+        </label>
 
-        <div>
-          <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase",
-            color: "var(--text-muted)", display: "block", marginBottom: 3 }}>
-            Desde
-          </label>
-          <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)}
-            style={{ padding: "7px 12px", borderRadius: 8, border: "1px solid var(--border)",
-              background: "var(--surface)", color: "var(--text)", fontSize: 13 }} />
-        </div>
+        <label className="field">
+          <span className="field__label">Desde</span>
+          <input className="field__input" type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)} />
+        </label>
 
-        <div>
-          <label style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase",
-            color: "var(--text-muted)", display: "block", marginBottom: 3 }}>
-            Hasta
-          </label>
-          <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)}
-            style={{ padding: "7px 12px", borderRadius: 8, border: "1px solid var(--border)",
-              background: "var(--surface)", color: "var(--text)", fontSize: 13 }} />
-        </div>
+        <label className="field">
+          <span className="field__label">Hasta</span>
+          <input className="field__input" type="date" value={dateTo} onChange={e => setDateTo(e.target.value)} />
+        </label>
 
-        <button
-          onClick={runAnalysis}
-          disabled={!stationId || loading}
-          style={{
-            padding: "8px 22px", borderRadius: 8, border: "none",
-            background: stationId && !loading ? "#3b82f6" : "var(--border)",
-            color: stationId && !loading ? "white" : "var(--text-muted)",
-            fontWeight: 700, fontSize: 13,
-            cursor: stationId && !loading ? "pointer" : "default",
-            transition: "background .15s",
-          }}
-        >
-          {loading ? "Analizando…" : "Analizar"}
+        <button className="btn btn--primary" onClick={runAnalysis} disabled={!stationId || loading}>
+          {loading ? <><Loader2 size={15} style={SPIN} /> Analizando…</> : "Analizar"}
         </button>
       </div>
 
       {/* Error */}
       {error && (
-        <div style={{ background: "#fee2e2", border: "1px solid #dc2626", borderRadius: 10,
-          padding: "10px 16px", color: "#b91c1c", fontSize: 13, marginBottom: 16 }}>
-          ⚠️ {error}
+        <div className="alert alert--error">
+          <AlertTriangle size={16} style={{ flexShrink: 0 }} /> {error}
         </div>
       )}
 
       {/* Empty state */}
       {!analysis && !loading && !error && (
-        <div style={{ textAlign: "center", padding: "4rem 0", color: "var(--text-muted)" }}>
-          <div style={{ fontSize: 48, marginBottom: 12 }}>📊</div>
+        <div className="empty-state">
+          <span className="empty-state__icon"><BarChart3 size={44} /></span>
           <p>Seleccioná una estación y hacé clic en <strong>Analizar</strong>.</p>
         </div>
       )}
 
       {/* Loading */}
       {loading && (
-        <div style={{ textAlign: "center", padding: "4rem 0", color: "var(--text-muted)" }}>
-          <div style={{ fontSize: 32, marginBottom: 10 }}>⏳</div>
+        <div className="empty-state">
+          <span className="empty-state__icon"><Loader2 size={32} style={SPIN} /></span>
           <p>Procesando datos…</p>
         </div>
       )}
@@ -419,36 +381,37 @@ export default function DataAnalysis() {
       {/* Resultado */}
       {analysis && !loading && (
         <>
-          <div style={{ marginBottom: 16, fontSize: 14, color: "var(--text-muted)" }}>
+          <div className="num" style={{ fontSize: 14, color: "var(--text-muted)" }}>
             Estación: <strong style={{ color: "var(--text)" }}>{analysis.station_name}</strong>
             {" · "}
-            <span style={{ fontFamily: "monospace" }}>{analysis.station_code}</span>
+            <span>{analysis.station_code}</span>
           </div>
 
           {/* Tabs */}
-          <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             {Object.entries(VAR_META).map(([key, meta]) => {
               const vd     = analysis.variables?.[key]
               const active = activeVar === key
+              const TabIcon = meta.Icon
               return (
                 <button
                   key={key}
                   onClick={() => setActiveVar(key)}
                   style={{
-                    padding: "8px 18px", borderRadius: 10,
-                    border: `2px solid ${active ? meta.color : "var(--border)"}`,
+                    padding: "8px 18px", borderRadius: "var(--radius)",
+                    border: `1px solid ${active ? meta.color : "var(--border)"}`,
                     background: active ? meta.color + "18" : "var(--surface)",
                     color: active ? meta.color : "var(--text-muted)",
                     fontWeight: active ? 700 : 500, fontSize: 13, cursor: "pointer",
                     display: "flex", alignItems: "center", gap: 6, transition: "all .15s",
                   }}
                 >
-                  <span>{meta.icon}</span>
+                  <TabIcon size={16} />
                   {meta.label}
                   {vd?.completeness_band && (
                     <span style={{
                       width: 8, height: 8, borderRadius: "50%",
-                      background: BAND_COLORS[vd.completeness_band.color]?.border ?? "#ccc",
+                      background: BAND_COLORS[vd.completeness_band.color]?.border ?? "var(--text-faint)",
                       display: "inline-block",
                     }} />
                   )}
@@ -458,10 +421,7 @@ export default function DataAnalysis() {
           </div>
 
           {/* Panel */}
-          <div style={{
-            background: "var(--surface)", border: "1px solid var(--border)",
-            borderRadius: 14, padding: "24px",
-          }}>
+          <div className="card" style={{ padding: "24px" }}>
             <VariablePanel varKey={activeVar} varData={varData} />
           </div>
         </>

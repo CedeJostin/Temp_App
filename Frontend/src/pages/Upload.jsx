@@ -1,11 +1,15 @@
 import { useState, useRef } from "react"
 import { useFetch } from "../hooks/useFetch"
 import { stationsApi, uploadsApi } from "../services/api"
+import {
+  Thermometer, Droplets, Wind, FolderOpen, FileText, X,
+  AlertTriangle, Info, CircleCheckBig, CircleX,
+} from "lucide-react"
 
 const VARIABLES = [
-  { key: "temperatura", code: "TEMP",   label: "Temperatura",     icon: "🌡️", color: "#ef4444", border: "#ef444440" },
-  { key: "humedad",     code: "HR",     label: "Humedad Relativa", icon: "💧", color: "#3b82f6", border: "#3b82f640" },
-  { key: "viento",      code: "VIENTO", label: "Viento",           icon: "💨", color: "#22c55e", border: "#22c55e40" },
+  { key: "temperatura", code: "TEMP",   label: "Temperatura",      Icon: Thermometer, color: "#ef4444" },
+  { key: "humedad",     code: "HR",     label: "Humedad Relativa", Icon: Droplets,    color: "#3b82f6" },
+  { key: "viento",      code: "VIENTO", label: "Viento",           Icon: Wind,        color: "#22c55e" },
 ]
 
 const parsearCSV = (texto) => {
@@ -14,12 +18,12 @@ const parsearCSV = (texto) => {
 
   // ── Formato C: metadata en filas 0-3 (Estacion:;NOMBRE…) ──────────
   const primeraCelda = lineas[0].split(sep)[0].trim().toLowerCase()
-    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .normalize("NFD").replace(/[̀-ͯ]/g, "")
   if (primeraCelda === "estacion:" || primeraCelda === "estacion") {
     // Variable detectada en fila 2
     const celdaVar = lineas[2]?.split(sep) ?? []
     const textoVar = celdaVar.join(" ").toLowerCase()
-      .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+      .normalize("NFD").replace(/[̀-ͯ]/g, "")
     const variableDetectada =
       textoVar.includes("temperatura") ? "Temperatura" :
       textoVar.includes("humedad")     ? "Humedad"     :
@@ -48,7 +52,7 @@ const parsearCSV = (texto) => {
   // ── Formatos A / B: encabezado en fila 0 o 1 ──────────────────────
   const columnas = lineas[0].split(sep).map(c => c.trim().replace(/^\uFEFF/, ""))
   const colsNorm = columnas.map(c =>
-    c.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase()
+    c.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase()
   )
   const esHorario = colsNorm.includes("ano") && colsNorm.includes("h1")
   const esViento  = colsNorm.includes("fecha") && colsNorm.includes("velocidad")
@@ -65,6 +69,7 @@ const parsearCSV = (texto) => {
 function DropZone({ variable, archivo, preview, error, onFile, onQuitar }) {
   const ref = useRef()
   const [drag, setDrag] = useState(false)
+  const { Icon } = variable
 
   const handleDrop = (e) => {
     e.preventDefault(); setDrag(false)
@@ -73,20 +78,13 @@ function DropZone({ variable, archivo, preview, error, onFile, onQuitar }) {
   }
 
   return (
-    <div style={{
-      background: "var(--surface)", border: `1px solid ${archivo ? "#22c55e40" : "var(--border)"}`,
-      borderRadius: 12, padding: "16px 20px",
-    }}>
+    <div className="card" style={{ borderColor: archivo ? "var(--accent-border)" : "var(--border)" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span style={{ fontSize: 18 }}>{variable.icon}</span>
+          <span style={{ color: variable.color, display: "inline-flex" }}><Icon size={18} /></span>
           <span style={{ fontWeight: 600, fontSize: 14 }}>{variable.label}</span>
         </div>
-        {archivo && (
-          <span style={{ background: "#22c55e20", color: "#22c55e", borderRadius: 20, padding: "2px 10px", fontSize: 11, fontWeight: 600 }}>
-            Listo
-          </span>
-        )}
+        {archivo && <span className="chip" style={{ "--chip-color": "var(--success)" }}>Listo</span>}
       </div>
 
       <div
@@ -94,60 +92,60 @@ function DropZone({ variable, archivo, preview, error, onFile, onQuitar }) {
         onDragLeave={() => setDrag(false)}
         onDrop={handleDrop}
         onClick={() => !archivo && ref.current.click()}
-        style={{
-          border: `2px dashed ${drag ? variable.color : archivo ? "#22c55e" : "var(--border)"}`,
-          borderRadius: 10, padding: "14px 16px", cursor: archivo ? "default" : "pointer",
-          background: drag ? `${variable.color}10` : archivo ? "#22c55e10" : "transparent",
-          transition: "all 0.15s",
-        }}
+        className={`dropzone ${drag ? "dropzone--active" : ""} ${archivo ? "dropzone--has-file" : ""}`}
+        style={{ padding: "14px 16px", borderRadius: "var(--radius)" }}
       >
-        <input ref={ref} type="file" accept=".csv,.xlsx" className="hidden" onChange={e => e.target.files[0] && onFile(e.target.files[0])} />
+        <input ref={ref} type="file" accept=".csv,.xlsx" style={{ display: "none" }} onChange={e => e.target.files[0] && onFile(e.target.files[0])} />
 
         {archivo ? (
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <div>
-              <div style={{ fontWeight: 500, fontSize: 13 }}>{archivo.name}</div>
-              <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>
-                {(archivo.size / 1024).toFixed(1)} KB
-                {preview && ` · ${preview.totalFilas} filas · `}
-                {preview && <span style={{ color: preview.totalFaltantes > 0 ? "#f59e0b" : "#22c55e" }}>{preview.totalFaltantes} faltantes</span>}
+            <div style={{ textAlign: "left", display: "flex", alignItems: "center", gap: 8 }}>
+              <FileText size={18} style={{ color: "var(--text-muted)", flexShrink: 0 }} />
+              <div>
+                <div style={{ fontWeight: 500, fontSize: 13, color: "var(--text)" }}>{archivo.name}</div>
+                <div className="num" style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>
+                  {(archivo.size / 1024).toFixed(1)} KB
+                  {preview && ` · ${preview.totalFilas} filas · `}
+                  {preview && <span style={{ color: preview.totalFaltantes > 0 ? "var(--warning)" : "var(--success)" }}>{preview.totalFaltantes} faltantes</span>}
+                </div>
               </div>
             </div>
-            <button onClick={e => { e.stopPropagation(); onQuitar() }}
-              style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", fontSize: 18, padding: 4 }}>✕</button>
+            <button className="icon-btn icon-btn--danger" onClick={e => { e.stopPropagation(); onQuitar() }} aria-label="Quitar archivo">
+              <X size={16} />
+            </button>
           </div>
         ) : (
-          <div style={{ textAlign: "center", color: "var(--text-muted)", fontSize: 13 }}>
-            <div style={{ fontSize: 22, marginBottom: 4 }}>📂</div>
-            Arrastrá o <span style={{ color: variable.color }}>seleccioná</span> el archivo CSV / Excel
+          <div className="dropzone__hint">
+            <FolderOpen size={22} />
+            <span style={{ fontSize: 13 }}>Arrastrá o <span style={{ color: variable.color, fontWeight: 600 }}>seleccioná</span> el archivo CSV / Excel</span>
           </div>
         )}
       </div>
 
       {error && (
-        <div style={{ marginTop: 8, fontSize: 12, color: "#ef4444", background: "#ef444415", borderRadius: 6, padding: "6px 10px" }}>
-          ⚠️ {error}
+        <div className="alert alert--error" style={{ marginTop: 10, fontSize: 12 }}>
+          <AlertTriangle size={16} style={{ flexShrink: 0 }} /> {error}
         </div>
       )}
 
       {preview && !error && (
         <div style={{ marginTop: 10, overflowX: "auto" }}>
-          <table style={{ fontSize: 11, borderCollapse: "collapse", width: "100%" }}>
+          <table className="table" style={{ fontSize: 11 }}>
             <thead>
               <tr>
                 {preview.columnas.map(c => (
-                  <th key={c} style={{ padding: "3px 6px", color: "var(--text-muted)", fontWeight: 500, textAlign: "left", borderBottom: "1px solid var(--border)", whiteSpace: "nowrap" }}>{c}</th>
+                  <th key={c} style={{ whiteSpace: "nowrap" }}>{c}</th>
                 ))}
-                <th style={{ padding: "3px 6px", color: "var(--text-muted)" }}>…</th>
+                <th>…</th>
               </tr>
             </thead>
             <tbody>
               {preview.filas.map((fila, i) => (
                 <tr key={i}>
                   {fila.map((c, j) => (
-                    <td key={j} style={{ padding: "3px 6px", color: c === "-" || c === "-9" ? "#ef4444" : "var(--text-muted)", whiteSpace: "nowrap" }}>{c}</td>
+                    <td key={j} className="num" style={{ color: c === "-" || c === "-9" ? "var(--danger)" : "var(--text-muted)", whiteSpace: "nowrap" }}>{c}</td>
                   ))}
-                  <td style={{ padding: "3px 6px", color: "var(--text-muted)" }}>…</td>
+                  <td style={{ color: "var(--text-muted)" }}>…</td>
                 </tr>
               ))}
             </tbody>
@@ -182,9 +180,9 @@ export default function Upload() {
         setPreviews(p => ({ ...p, [key]: parsearCSV(texto) }))
       } catch {
         setErrores(p => ({
-  ...p,
-  [key]: "Formato no reconocido. Válidos: (A/B) encabezado con año;mes;dia;H1…H24, o (C) archivo con 'Estacion:' en fila 1 y horas 1:00…24:00"
-}))
+          ...p,
+          [key]: "Formato no reconocido. Válidos: (A/B) encabezado con año;mes;dia;H1…H24, o (C) archivo con 'Estacion:' en fila 1 y horas 1:00…24:00"
+        }))
       }
     }
     reader.readAsArrayBuffer(file)
@@ -220,42 +218,36 @@ export default function Upload() {
   return (
     <div className="page">
       <header className="page__header">
-        <h1 className="page__title">Cargar datos</h1>
-        <p className="page__subtitle">Subí los archivos CSV de cada variable por estación</p>
+        <div>
+          <h1 className="page__title">Cargar datos</h1>
+          <p className="page__subtitle">Subí los archivos CSV de cada variable por estación</p>
+        </div>
       </header>
 
       {/* Selector de estación */}
-      <div style={{
-        background: "var(--surface)", border: "1px solid var(--border)",
-        borderRadius: 12, padding: "16px 20px", marginBottom: 20,
-      }}>
-        <label style={{ fontSize: 11, fontWeight: 600, textTransform: "uppercase", color: "var(--text-muted)", display: "block", marginBottom: 6 }}>
-          Estación meteorológica *
+      <div className="card">
+        <label className="field">
+          <span className="field__label">Estación meteorológica *</span>
+          <select
+            className="field__select"
+            value={stationId}
+            onChange={e => { setStationId(e.target.value); setSubido(false) }}
+            style={{ width: "100%" }}
+          >
+            <option value="">Seleccionar estación…</option>
+            {stations.map(s => <option key={s.id} value={s.id}>{s.name} ({s.station_code})</option>)}
+          </select>
         </label>
-        <select
-          value={stationId}
-          onChange={e => { setStationId(e.target.value); setSubido(false) }}
-          style={{
-            width: "100%", padding: "8px 12px", borderRadius: 8, fontSize: 14,
-            background: "var(--surface-2, #1e293b)", border: "1px solid var(--border)",
-            color: "var(--text)",
-          }}
-        >
-          <option value="">Seleccionar estación…</option>
-          {stations.map(s => <option key={s.id} value={s.id}>{s.name} ({s.station_code})</option>)}
-        </select>
       </div>
 
       {/* Info formato */}
-      <div style={{
-        background: "#3b82f610", border: "1px solid #3b82f630",
-        borderRadius: 10, padding: "10px 16px", marginBottom: 20, fontSize: 12, color: "#93c5fd",
-      }}>
-        ℹ️ <strong>Formato esperado:</strong> separador punto y coma (;) · columnas año, mes, dia, H1…H24 · valores faltantes con guion (-)
+      <div className="alert alert--info" style={{ fontSize: 12 }}>
+        <Info size={16} style={{ flexShrink: 0 }} />
+        <span><strong>Formato esperado:</strong> separador punto y coma (;) · columnas año, mes, dia, H1…H24 · valores faltantes con guion (-)</span>
       </div>
 
       {/* Drop zones */}
-      <div style={{ display: "flex", flexDirection: "column", gap: 16, marginBottom: 20 }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
         {VARIABLES.map(v => (
           <DropZone
             key={v.key}
@@ -270,19 +262,16 @@ export default function Upload() {
       </div>
 
       {/* Botón + resultados */}
-      <div style={{
-        background: "var(--surface)", border: "1px solid var(--border)",
-        borderRadius: 12, padding: "16px 20px",
-      }}>
+      <div className="card">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
           <span style={{ fontSize: 13, color: "var(--text-muted)" }}>
             {archivosListos === 0 ? "Ningún archivo cargado" : `${archivosListos} de 3 archivo${archivosListos > 1 ? "s" : ""} listo${archivosListos > 1 ? "s" : ""}`}
           </span>
           <div style={{ display: "flex", gap: 6 }}>
             {VARIABLES.map(v => (
-              <div key={v.key} style={{
+              <span key={v.key} style={{
                 width: 8, height: 8, borderRadius: "50%",
-                background: archivos[v.key] ? "#22c55e" : "var(--border)",
+                background: archivos[v.key] ? "var(--success)" : "var(--border2)",
               }} title={v.label} />
             ))}
           </div>
@@ -292,10 +281,10 @@ export default function Upload() {
           onClick={handleSubir}
           disabled={!puedeSubir}
           className="btn btn--primary"
-          style={{ width: "100%", opacity: puedeSubir ? 1 : 0.5, cursor: puedeSubir ? "pointer" : "not-allowed" }}
+          style={{ width: "100%" }}
         >
           {cargando
-            ? "⏳ Procesando archivos…"
+            ? "Procesando archivos…"
             : !stationId
               ? "Seleccioná una estación para continuar"
               : !hayAlgunArchivo
@@ -308,22 +297,19 @@ export default function Upload() {
           <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 8 }}>
             {Object.entries(resultados).map(([key, res]) => {
               const v = VARIABLES.find(x => x.key === key)
+              const VIcon = v.Icon
               return (
-                <div key={key} style={{
-                  borderRadius: 8, padding: "10px 14px", fontSize: 13,
-                  background: res.ok ? "#22c55e15" : "#ef444415",
-                  border: `1px solid ${res.ok ? "#22c55e30" : "#ef444430"}`,
-                }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    <span>{v.icon} <strong>{v.label}</strong></span>
-                    <span>{res.ok ? "✅" : "❌"}</span>
+                <div key={key} className={`alert ${res.ok ? "alert--success" : "alert--error"}`} style={{ flexDirection: "column", gap: 4 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%" }}>
+                    <span style={{ display: "flex", alignItems: "center", gap: 6 }}><VIcon size={15} /> <strong>{v.label}</strong></span>
+                    {res.ok ? <CircleCheckBig size={16} /> : <CircleX size={16} />}
                   </div>
                   {res.ok ? (
-                    <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 4 }}>
+                    <div className="num" style={{ fontSize: 12, color: "var(--text-muted)" }}>
                       {res.data.rows_inserted?.toLocaleString()} filas insertadas · Variable: {res.data.variable_type}
                     </div>
                   ) : (
-                    <div style={{ fontSize: 12, color: "#ef4444", marginTop: 4 }}>{res.error}</div>
+                    <div style={{ fontSize: 12 }}>{res.error}</div>
                   )}
                 </div>
               )

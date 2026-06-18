@@ -34,8 +34,8 @@ export function Badge({ label, color }) {
 // ─── StatCard ─────────────────────────────────────────────────────────────────
 export function StatCard({ label, value, unit, icon, color }) {
   return (
-    <div className="stat-card" style={{ borderTopColor: color }}>
-      <div className="stat-card__icon" style={{ color }}>{icon}</div>
+    <div className="stat-card" style={color ? { "--stat-accent": color } : undefined}>
+      {icon && <div className="stat-card__icon">{icon}</div>}
       <div className="stat-card__body">
         <p className="stat-card__label">{label}</p>
         <p className="stat-card__value">

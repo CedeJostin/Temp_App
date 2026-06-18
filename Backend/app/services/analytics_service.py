@@ -11,15 +11,24 @@ Se llama después de cada carga de CSV exitosa.
 """
 
 import json
+import logging
+
 import numpy as np
 import pandas as pd
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
+logger = logging.getLogger(__name__)
+
 from app.models.daily_stats import DailyStats
 from app.models.monthly_stats import MonthlyStats
 from app.models.heatmap_stats import HeatmapStats
 from app.models.distribution_analysis import DistributionAnalysis
+from app.services.distribution_fitting import (
+    _build_fdp,
+    _fit_gaussian_components,
+    _fit_beta_components,
+)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -221,19 +230,13 @@ def _calc_distribution(
     station_id: str, variable_id: str,
     variable_code: str,
 ) -> list[str]:
-    print(f">>> _calc_distribution iniciado: variable_code={variable_code}")
-    
-    from app.api.routes.measurements import (
-        _build_fdp,
-        _fit_gaussian_components,
-        _fit_beta_components,
-    )
+    logger.debug(f">>> _calc_distribution iniciado: variable_code={variable_code}")
 
     values = df["value"].values
     is_hr  = variable_code.strip().upper() == "HR"
     paso   = 1.0 if is_hr else 0.1
 
-    print(f">>> valores: {len(values)}, is_hr={is_hr}")
+    logger.debug(f">>> valores: {len(values)}, is_hr={is_hr}")
 
     n    = len(values)
     mean = float(np.mean(values))
@@ -263,12 +266,12 @@ def _calc_distribution(
     completitud = round(n / horas_totales * 100, 2)
 
     fdp = _build_fdp(values, paso)
-    print(f">>> fdp bins: {len(fdp)}")
+    logger.debug(f">>> fdp bins: {len(fdp)}")
     
     if len(fdp) <= 4:
         return ["⚠️ distribution_analysis: muy pocos bins para ajustar"]
 
-    print(f">>> iniciando ajuste {'beta' if is_hr else 'gaussian'}...")
+    logger.debug(f">>> iniciando ajuste {'beta' if is_hr else 'gaussian'}...")
     try:
         if is_hr:
             components, r2, mse, fdp_fitted = _fit_beta_components(fdp, n_components=5)  # ← 5 como antes
@@ -276,12 +279,12 @@ def _calc_distribution(
         else:
             components, r2, mse, fdp_fitted = _fit_gaussian_components(fdp, n_components=2)  # ← 2 como antes
             dist_type = "gaussian"
-        print(f">>> ajuste completado: {dist_type}, r2={r2}")
+        logger.debug(f">>> ajuste completado: {dist_type}, r2={r2}")
     except Exception as e:
-        print(f">>> ERROR en ajuste: {e}")
+        logger.error(f">>> ERROR en ajuste: {e}")
         return [f"❌ distribution_analysis: error en ajuste: {e}"]
 
-    print(f">>> guardando en BD...")
+    logger.debug(f">>> guardando en BD...")
     try:
         db.execute(text("""
             DELETE FROM distribution_analysis
@@ -332,11 +335,11 @@ def _calc_distribution(
         })
 
         db.commit()
-        print(f">>> ✅ guardado exitosamente")
+        logger.debug(f">>> ✅ guardado exitosamente")
 
     except Exception as e:
         db.rollback()
-        print(f">>> ERROR al guardar: {e}")
+        logger.error(f">>> ERROR al guardar: {e}")
         return [f"❌ distribution_analysis: error al guardar: {e}"]
 
     return [f"✅ distribution_analysis: {dist_type} con {len(components)} componentes (R²={r2})"]
