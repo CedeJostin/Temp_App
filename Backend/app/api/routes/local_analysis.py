@@ -698,22 +698,79 @@ async def analizar_multi_local(
 
 
 def _analizar_combinado(df_t: pd.DataFrame, df_h: pd.DataFrame, altitude: float = 0) -> dict:
+    """
+    Análisis combinado T×HR. Replica EXACTAMENTE la lógica y las fórmulas del
+    endpoint GET /combined de charts.py (usado por Analysis.jsx), para que los
+    gráficos generados desde archivo sean idénticos a los de la base de datos.
+
+    Variables psicrométricas (Velázquez Martí, UPV) — coherentes con Carrier,
+    presiones en pascales (Pa):
+      P_sat:  log10(P_sat) = (10.2858·T_K − 2148.49)/(T_K − 35.85)
+      P_tot:  101325·(1 − 2.25577e-5·z)^5.2559
+      ω:      0.622·P_vap/(P_tot − P_vap)           [kg vapor/kg aire seco]
+      T_roc:  (35.85·log10(P_v) − 2148.49)/(log10(P_v) − 10.2858) − 273.15
+      h:      1.005·T + ω·(2503 + 1.86·T)           [kJ/kg aire seco]
+    """
+    import math
+
+    def _p_sat_pa(t_c):
+        t_k = t_c + 273.15
+        return 10.0 ** ((10.2858 * t_k - 2148.49) / (t_k - 35.85))
+
+    def _humidity_ratio(t_c, hr_pct, p_total):
+        """ω en kg vapor/kg aire seco. None si no es físico."""
+        p_vap = (hr_pct / 100.0) * _p_sat_pa(t_c)
+        denom = p_total - p_vap
+        if denom <= 0:
+            return None
+        return 0.622 * p_vap / denom
+
+    def _dew_point_c(p_vap_pa):
+        if p_vap_pa is None or p_vap_pa <= 0:
+            return None
+        log_pv = math.log10(p_vap_pa)
+        denom = log_pv - 10.2858
+        if denom == 0:
+            return None
+        return (35.85 * log_pv - 2148.49) / denom - 273.15
+
+    def _iso_rh_curves(t_min, t_max, p_total, rh_levels, n=80):
+        """Curvas de HR constante: ω(T) sobre [t_min, t_max] para cada HR."""
+        curves = []
+        span = max(t_max - t_min, 1e-6)
+        for rh in rh_levels:
+            pts = []
+            for i in range(n + 1):
+                t = t_min + span * i / n
+                w = _humidity_ratio(t, rh, p_total)
+                if w is None:
+                    continue
+                pts.append({"T": round(t, 2), "habs": round(1000.0 * w, 4)})
+            if pts:
+                curves.append({"rh": rh, "points": pts})
+        return curves
+
+    p_tot = 101325.0 * (1 - 2.25577e-5 * altitude) ** 5.2559
+
     t_map  = {str(r["measured_at"]): float(r["value"]) for _, r in df_t.iterrows()}
     joined = []
 
     for _, row in df_h.iterrows():
         T = t_map.get(str(row["measured_at"]))
-        if T is None: continue
-        HR      = float(row["value"])
-        p_sat   = 9.066 * np.exp(0.0641 * T) - 1.796 * np.exp(0.0805 * T)
-        p_tot   = 1013.25 * (1 - 2.25577e-5 * altitude) ** 5.2559
-        hr_frac = HR / 100
-        denom   = p_tot - hr_frac * p_sat
-        h_abs   = (18000 / 29) * (hr_frac * p_sat) / denom if denom > 0 else None
-        ts      = row["measured_at"]
+        if T is None:
+            continue
+        HR    = float(row["value"])
+        p_vap = (HR / 100.0) * _p_sat_pa(T)
+        w     = _humidity_ratio(T, HR, p_tot)
+        h_abs = None if w is None else 1000.0 * w                 # g/kg aire seco
+        tr    = _dew_point_c(p_vap)                               # °C
+        h_ent = None if w is None else 1.005 * T + w * (2503 + 1.86 * T)  # kJ/kg as
+        ts    = row["measured_at"]
         joined.append({
             "measured_at": ts, "T": T, "HR": HR,
             "habs": round(h_abs, 4) if h_abs is not None else None,
+            "tr":   round(tr, 2)    if tr    is not None else None,
+            "h":    round(h_ent, 2) if h_ent is not None else None,
             "mes":  ts.month, "hora": ts.hour,
         })
 
@@ -723,9 +780,9 @@ def _analizar_combinado(df_t: pd.DataFrame, df_h: pd.DataFrame, altitude: float 
     df = pd.DataFrame(joined)
     df["measured_at"] = pd.to_datetime(df["measured_at"])
 
-    # Densidad T×HR con contornos 90/95/99%
-    df["T_bin"]  = (df["T"]  / 1).round() * 1
-    df["HR_bin"] = (df["HR"] / 5).round() * 5
+    # Densidad T×HR (binning 0.1°C / 1%) con contornos 90/95/99%
+    df["T_bin"]  = (df["T"]  / 0.1).round() * 0.1
+    df["HR_bin"] = (df["HR"] / 1.0).round() * 1.0
     density_raw  = (
         df.groupby(["T_bin", "HR_bin"]).size().reset_index(name="count")
         .rename(columns={"T_bin": "T", "HR_bin": "HR"})
@@ -734,7 +791,7 @@ def _analizar_combinado(df_t: pd.DataFrame, df_h: pd.DataFrame, altitude: float 
     density_raw["pct"] = (density_raw["count"] / total_pts * 100).round(3)
     density_sorted = density_raw.sort_values("count", ascending=False).copy()
     density_sorted["cum_pct"] = density_sorted["count"].cumsum() / total_pts * 100
-    density_raw = density_raw.merge(density_sorted[["T","HR","cum_pct"]], on=["T","HR"], how="left")
+    density_raw = density_raw.merge(density_sorted[["T", "HR", "cum_pct"]], on=["T", "HR"], how="left")
 
     def _contour(cum):
         if cum <= 90: return "90"
@@ -749,13 +806,16 @@ def _analizar_combinado(df_t: pd.DataFrame, df_h: pd.DataFrame, altitude: float 
     humect_count = int(humect_mask.sum())
     humect_pct   = round(humect_count / total_pts * 100, 2)
 
-    # Movilidad
+    # Movilidad mes × hora
     mobility = []
     for mes in range(1, 13):
         sub = df[df["mes"] == mes]
+        if len(sub) == 0:
+            continue
         for hora in range(24):
             h_sub = sub[sub["hora"] == hora]
-            if len(h_sub) == 0: continue
+            if len(h_sub) == 0:
+                continue
             mobility.append({
                 "mes": mes, "hora": hora,
                 "T_avg":  round(float(h_sub["T"].mean()),  2),
@@ -765,22 +825,37 @@ def _analizar_combinado(df_t: pd.DataFrame, df_h: pd.DataFrame, altitude: float 
             })
 
     # H_abs mensual
-    df_h = df.dropna(subset=["habs"]).copy()
-    df_h["period"] = df_h["measured_at"].dt.to_period("M").dt.to_timestamp()
-    habs_monthly = df_h.groupby("period")["habs"].mean().round(4).reset_index()
+    df_habs = df.dropna(subset=["habs"]).copy()
+    df_habs["period"] = df_habs["measured_at"].dt.to_period("M").dt.to_timestamp()
+    habs_monthly = (
+        df_habs.groupby("period")["habs"].mean().round(4).reset_index().rename(columns={"habs": "avg"})
+    )
     habs_series  = [
-        {"period": str(r["period"].date())[:7]+"-01", "avg": float(r["habs"])}
-        for _, r in habs_monthly.iterrows()
+        {"period": str(row["period"].date())[:7] + "-01", "avg": float(row["avg"])}
+        for _, row in habs_monthly.iterrows()
     ]
 
-    scatter = df[["T","HR","habs","mes","hora"]].dropna().head(2000).to_dict(orient="records")
+    scatter_cols = [c for c in ["T", "HR", "habs", "tr", "h", "mes", "hora"] if c in df.columns]
+    scatter_sample = (
+        df[scatter_cols].dropna(subset=["T", "HR", "habs"]).head(2000).to_dict(orient="records")
+    )
+
+    # Curvas de HR constante para el diagrama psicrométrico (Carrier)
+    t_lo = math.floor(float(df["T"].min())) - 1
+    t_hi = math.ceil(float(df["T"].max())) + 1
+    iso_rh       = _iso_rh_curves(t_lo, t_hi, p_tot, rh_levels=[10, 20, 30, 40, 50, 60, 70, 80, 90, 100])
+    humect_curve = _iso_rh_curves(t_lo, t_hi, p_tot, rh_levels=[79])
 
     return {
         "density":      density,
         "humect_pct":   humect_pct,
         "humect_count": humect_count,
         "habs_monthly": habs_series,
-        "scatter":      scatter,
+        "scatter":      scatter_sample,
         "mobility":     mobility,
         "total_paired": total_pts,
+        "iso_rh":       iso_rh,
+        "humect_curve": humect_curve,
+        "p_tot_pa":     round(p_tot, 1),
+        "altitude":     altitude,
     }

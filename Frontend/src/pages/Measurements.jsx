@@ -1,7 +1,8 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
+import * as d3 from 'd3'
 import {
   AreaChart, Area, BarChart, Bar, LineChart, Line,
-  ScatterChart, Scatter, XAxis, YAxis, CartesianGrid,
+  XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, Legend, ReferenceLine,
 } from 'recharts'
 import { localAnalysisApi } from '../services/api'
@@ -45,6 +46,225 @@ const QualityBadge = ({ ok, label, value, target }) => (
     <div style={{ color: '#8b94a6', marginTop: 2 }}>{value} <span style={{ color: '#5b6577' }}>({target})</span></div>
   </div>
 )
+
+// ── Color para mapa de movilidad (TEMP/HR), igual a Analysis ──
+const heatColorTH = (val, min, max, type) => {
+  if (val == null) return '#161a21'
+  const t = max > min ? Math.max(0, Math.min(1, (val - min) / (max - min))) : 0
+  if (type === 'TEMP') {
+    const r = t < 0.5 ? lerp(59, 250, t*2)  : lerp(250, 220, (t-0.5)*2)
+    const g = t < 0.5 ? lerp(130, 204, t*2) : lerp(204, 38,  (t-0.5)*2)
+    const b = t < 0.5 ? lerp(246, 20, t*2)  : lerp(20, 38,   (t-0.5)*2)
+    return `rgb(${r},${g},${b})`
+  }
+  const r = lerp(240, 30, t), g = lerp(249, 64, t), bl = lerp(255, 175, t)
+  return `rgb(${r},${g},${bl})`
+}
+
+// ══════════════════════════════════════════════════════════════
+// KDE HEATMAP SVG con D3 (densidad conjunta f(HR,T)) — igual a Analysis
+// ══════════════════════════════════════════════════════════════
+function KDEHeatmapSVG({ densityPoints, tMin, tMax, hrMin, hrMax, width, height }) {
+  const svgRef = useRef(null)
+
+  useEffect(() => {
+    if (!svgRef.current || !densityPoints?.length) return
+
+    const pad = { top: 20, right: 110, bottom: 50, left: 60 }
+    const pw = width  - pad.left - pad.right
+    const ph = height - pad.top  - pad.bottom
+    if (pw <= 0 || ph <= 0) return
+
+    const xScale = d3.scaleLinear().domain([tMin, tMax]).range([0, pw])
+    const yScale = d3.scaleLinear().domain([hrMin, hrMax]).range([ph, 0])
+
+    const contours = d3.contourDensity()
+      .x(d => xScale(d.T))
+      .y(d => yScale(d.HR))
+      .size([pw, ph])
+      .bandwidth(18)
+      .thresholds(24)(densityPoints)
+
+    const maxDensity = d3.max(contours, d => d.value) || 1
+    const colorScale = d3.scaleSequential(d3.interpolateViridis).domain([0, maxDensity])
+
+    const svg = d3.select(svgRef.current)
+    svg.selectAll('*').remove()
+
+    const defs = svg.append('defs')
+    defs.append('clipPath').attr('id', 'mkde-plot-clip')
+      .append('rect').attr('width', pw).attr('height', ph)
+
+    const cbGrad = defs.append('linearGradient')
+      .attr('id', 'mkde-cb-grad')
+      .attr('x1', '0%').attr('x2', '0%').attr('y1', '0%').attr('y2', '100%')
+    d3.range(11).forEach(i => {
+      cbGrad.append('stop').attr('offset', `${i * 10}%`).attr('stop-color', d3.interpolateViridis(1 - i / 10))
+    })
+
+    const g = svg.append('g').attr('transform', `translate(${pad.left},${pad.top})`)
+    g.append('rect').attr('width', pw).attr('height', ph).attr('fill', '#0a0a1a')
+
+    g.append('g').attr('clip-path', 'url(#mkde-plot-clip)')
+      .selectAll('path').data(contours).join('path')
+      .attr('d', d3.geoPath()).attr('fill', d => colorScale(d.value)).attr('stroke', 'none')
+
+    g.append('g').attr('clip-path', 'url(#mkde-plot-clip)')
+      .selectAll('path').data(contours.filter((_, i) => i % 3 === 0)).join('path')
+      .attr('d', d3.geoPath()).attr('fill', 'none')
+      .attr('stroke', d => colorScale(d.value * 1.5 > maxDensity ? maxDensity : d.value * 1.5))
+      .attr('stroke-width', 0.6).attr('opacity', 0.7)
+
+    const y79 = yScale(79)
+    if (y79 >= 0 && y79 <= ph) {
+      g.append('line').attr('x1', 0).attr('x2', pw).attr('y1', y79).attr('y2', y79)
+        .attr('stroke', '#f97316').attr('stroke-width', 1.5).attr('stroke-dasharray', '8,4')
+      g.append('text').attr('x', pw - 4).attr('y', y79 - 5).attr('fill', '#f97316')
+        .attr('font-size', 11).attr('text-anchor', 'end').text('HR=79%')
+    }
+    const x10 = xScale(10)
+    if (x10 >= 0 && x10 <= pw) {
+      g.append('line').attr('x1', x10).attr('x2', x10).attr('y1', 0).attr('y2', ph)
+        .attr('stroke', '#f97316').attr('stroke-width', 1.5).attr('stroke-dasharray', '8,4')
+      g.append('text').attr('x', x10 + 3).attr('y', 14).attr('fill', '#f97316').attr('font-size', 11).text('T=10°C')
+    }
+
+    g.append('g').attr('transform', `translate(0,${ph})`)
+      .call(d3.axisBottom(xScale).ticks((tMax - tMin) / 2.5).tickSize(-ph).tickFormat(''))
+      .call(ax => ax.select('.domain').remove())
+      .call(ax => ax.selectAll('line').attr('stroke', '#272d37').attr('stroke-dasharray', '2,4').attr('opacity', 0.6))
+    g.append('g').call(d3.axisLeft(yScale).ticks(6).tickSize(-pw).tickFormat(''))
+      .call(ax => ax.select('.domain').remove())
+      .call(ax => ax.selectAll('line').attr('stroke', '#272d37').attr('stroke-dasharray', '2,4').attr('opacity', 0.6))
+
+    g.append('g').attr('transform', `translate(0,${ph})`)
+      .call(d3.axisBottom(xScale).ticks((tMax - tMin) / 2.5).tickFormat(d => d.toFixed(1)))
+      .call(ax => ax.select('.domain').attr('stroke', '#353d4a'))
+      .call(ax => ax.selectAll('.tick line').attr('stroke', '#353d4a'))
+      .call(ax => ax.selectAll('.tick text').attr('fill', '#8b94a6').attr('font-size', 11).attr('font-family', 'monospace'))
+    g.append('text').attr('x', pw / 2).attr('y', ph + 42).attr('fill', '#c3cad6')
+      .attr('font-size', 13).attr('text-anchor', 'middle').text('Temperatura (°C)')
+
+    g.append('g').call(d3.axisLeft(yScale).tickValues([0, 20, 40, 60, 80, 100].filter(v => v >= hrMin && v <= hrMax)).tickFormat(d => d.toFixed(0)))
+      .call(ax => ax.select('.domain').attr('stroke', '#353d4a'))
+      .call(ax => ax.selectAll('.tick line').attr('stroke', '#353d4a'))
+      .call(ax => ax.selectAll('.tick text').attr('fill', '#8b94a6').attr('font-size', 11).attr('font-family', 'monospace'))
+    g.append('text').attr('transform', 'rotate(-90)').attr('x', -ph / 2).attr('y', -46)
+      .attr('fill', '#c3cad6').attr('font-size', 13).attr('text-anchor', 'middle').text('HR (%)')
+
+    g.append('rect').attr('width', pw).attr('height', ph).attr('fill', 'none').attr('stroke', '#353d4a').attr('stroke-width', 0.8)
+
+    const cbX = pw + 14, cbW = 16
+    g.append('rect').attr('x', cbX).attr('y', 0).attr('width', cbW).attr('height', ph)
+      .attr('fill', 'url(#mkde-cb-grad)').attr('stroke', '#353d4a').attr('stroke-width', 0.5)
+    d3.range(5).map(i => (i / 4) * maxDensity).forEach(v => {
+      const cy = ph - (v / maxDensity) * ph
+      g.append('line').attr('x1', cbX + cbW).attr('x2', cbX + cbW + 4).attr('y1', cy).attr('y2', cy)
+        .attr('stroke', '#8b94a6').attr('stroke-width', 0.5)
+      g.append('text').attr('x', cbX + cbW + 7).attr('y', cy + 3).attr('fill', '#8b94a6')
+        .attr('font-size', 10).attr('font-family', 'monospace').text(v.toFixed(4))
+    })
+    g.append('text').attr('transform', 'rotate(-90)').attr('x', -ph / 2).attr('y', cbX + cbW + 44)
+      .attr('fill', '#c3cad6').attr('font-size', 11).attr('text-anchor', 'middle').text('f(HR;T)')
+  }, [densityPoints, tMin, tMax, hrMin, hrMax, width, height])
+
+  return <svg ref={svgRef} width={width} height={height} style={{ display: 'block', width: '100%', borderRadius: 8 }} />
+}
+
+// ══════════════════════════════════════════════════════════════
+// DIAGRAMA PSICROMÉTRICO (Carrier) con D3 — igual a Analysis
+// ══════════════════════════════════════════════════════════════
+function PsychrometricChartSVG({ scatter, isoRh, humectCurve, tMin, tMax, width, height }) {
+  const svgRef = useRef(null)
+
+  useEffect(() => {
+    if (!svgRef.current) return
+
+    const pad = { top: 20, right: 64, bottom: 50, left: 64 }
+    const pw  = width  - pad.left - pad.right
+    const ph  = height - pad.top  - pad.bottom
+    if (pw <= 0 || ph <= 0) return
+
+    const habsVals = (scatter ?? []).map(d => d.habs).filter(v => v != null)
+    let yMax = habsVals.length ? d3.max(habsVals) : 1
+    yMax = Math.max(2, Math.ceil((yMax * 1.12) / 2) * 2)
+
+    const xScale = d3.scaleLinear().domain([tMin, tMax]).range([0, pw])
+    const yScale = d3.scaleLinear().domain([0, yMax]).range([ph, 0])
+
+    const line = d3.line().defined(d => d.habs != null).x(d => xScale(d.T)).y(d => yScale(d.habs))
+
+    const svg = d3.select(svgRef.current)
+    svg.selectAll('*').remove()
+    const defs = svg.append('defs')
+    defs.append('clipPath').attr('id', 'mpsy-clip').append('rect').attr('width', pw).attr('height', ph)
+
+    const g = svg.append('g').attr('transform', `translate(${pad.left},${pad.top})`)
+    g.append('rect').attr('width', pw).attr('height', ph).attr('fill', '#0a0a14')
+
+    g.append('g').attr('transform', `translate(0,${ph})`)
+      .call(d3.axisBottom(xScale).ticks(10).tickSize(-ph).tickFormat(''))
+      .call(ax => ax.select('.domain').remove())
+      .call(ax => ax.selectAll('line').attr('stroke', '#272d37').attr('stroke-dasharray', '2,4').attr('opacity', 0.5))
+    g.append('g').call(d3.axisLeft(yScale).ticks(6).tickSize(-pw).tickFormat(''))
+      .call(ax => ax.select('.domain').remove())
+      .call(ax => ax.selectAll('line').attr('stroke', '#272d37').attr('stroke-dasharray', '2,4').attr('opacity', 0.5))
+
+    const plot = g.append('g').attr('clip-path', 'url(#mpsy-clip)')
+
+    ;(isoRh ?? []).forEach(curve => {
+      const isSat = curve.rh === 100
+      plot.append('path').datum(curve.points).attr('d', line).attr('fill', 'none')
+        .attr('stroke', isSat ? '#e0f2fe' : '#38bdf8')
+        .attr('stroke-width', isSat ? 2 : 1).attr('opacity', isSat ? 0.95 : 0.4)
+      const visible = curve.points.filter(p => {
+        const y = yScale(p.habs), x = xScale(p.T)
+        return y >= 0 && y <= ph && x >= 0 && x <= pw
+      })
+      const lbl = visible[visible.length - 1]
+      if (lbl) {
+        g.append('text').attr('x', Math.min(xScale(lbl.T) + 3, pw - 2)).attr('y', yScale(lbl.habs) - 2)
+          .attr('fill', isSat ? '#e0f2fe' : '#7dd3fc').attr('font-size', 9).attr('font-family', 'monospace').text(`${curve.rh}%`)
+      }
+    })
+
+    const x10 = xScale(10)
+    if (x10 >= 0 && x10 <= pw) {
+      plot.append('line').attr('x1', x10).attr('x2', x10).attr('y1', 0).attr('y2', ph)
+        .attr('stroke', '#f97316').attr('stroke-width', 1.2).attr('stroke-dasharray', '8,4').attr('opacity', 0.8)
+      g.append('text').attr('x', x10 + 3).attr('y', 12).attr('fill', '#f97316').attr('font-size', 10).text('T=10°C')
+    }
+    if (humectCurve?.length) {
+      plot.append('path').datum(humectCurve).attr('d', line).attr('fill', 'none')
+        .attr('stroke', '#f97316').attr('stroke-width', 1.2).attr('stroke-dasharray', '8,4').attr('opacity', 0.85)
+    }
+
+    plot.append('g').selectAll('circle').data(scatter ?? []).join('circle')
+      .attr('cx', d => xScale(d.T)).attr('cy', d => yScale(d.habs)).attr('r', 2)
+      .attr('fill', '#22c55e').attr('opacity', 0.22)
+      .append('title').text(d => `T=${d.T}°C · HR=${d.HR}%\nH abs=${d.habs} g/kg`
+        + (d.tr != null ? ` · T rocío=${d.tr}°C` : '') + (d.h != null ? `\nEntalpía=${d.h} kJ/kg` : ''))
+
+    g.append('g').attr('transform', `translate(0,${ph})`)
+      .call(d3.axisBottom(xScale).ticks(10).tickFormat(d => d.toFixed(0)))
+      .call(ax => ax.select('.domain').attr('stroke', '#353d4a'))
+      .call(ax => ax.selectAll('.tick line').attr('stroke', '#353d4a'))
+      .call(ax => ax.selectAll('.tick text').attr('fill', '#8b94a6').attr('font-size', 11).attr('font-family', 'monospace'))
+    g.append('g').call(d3.axisLeft(yScale).ticks(6).tickFormat(d => d.toFixed(0)))
+      .call(ax => ax.select('.domain').attr('stroke', '#353d4a'))
+      .call(ax => ax.selectAll('.tick line').attr('stroke', '#353d4a'))
+      .call(ax => ax.selectAll('.tick text').attr('fill', '#8b94a6').attr('font-size', 11).attr('font-family', 'monospace'))
+
+    g.append('text').attr('x', pw / 2).attr('y', ph + 40).attr('fill', '#c3cad6')
+      .attr('font-size', 13).attr('text-anchor', 'middle').text('Temperatura de bulbo seco (°C)')
+    g.append('text').attr('transform', 'rotate(-90)').attr('x', -ph / 2).attr('y', -48)
+      .attr('fill', '#c3cad6').attr('font-size', 13).attr('text-anchor', 'middle').text('Humedad absoluta (g/kg aire seco)')
+
+    g.append('rect').attr('width', pw).attr('height', ph).attr('fill', 'none').attr('stroke', '#353d4a').attr('stroke-width', 0.8)
+  }, [scatter, isoRh, humectCurve, tMin, tMax, width, height])
+
+  return <svg ref={svgRef} width={width} height={height} style={{ display: 'block', width: '100%', borderRadius: 8 }} />
+}
 
 // ── Mapa de calor ─────────────────────────────────────────────
 function HeatmapGrid({ heatmap, color, unit }) {
@@ -451,6 +671,19 @@ function ResultCard({ variable, resultado }) {
 // ── Sección combinada T×HR ────────────────────────────────────
 function CombinedCard({ combined }) {
   const [tab, setTab] = useState('density')
+  const [svgW, setSvgW] = useState(700)
+  const containerRef = useRef(null)
+
+  useEffect(() => {
+    if (!containerRef.current) return
+    const ro = new ResizeObserver(entries => {
+      const w = entries[0]?.contentRect?.width
+      if (w > 0) setSvgW(Math.floor(w))
+    })
+    ro.observe(containerRef.current)
+    return () => ro.disconnect()
+  }, [])
+
   if (!combined || combined.error) return (
     <div style={{ ...S, color: '#ef4444', fontSize: 13 }}>
       ⚠️ Combinado T×HR: {combined?.error || 'Sin datos'}
@@ -458,13 +691,23 @@ function CombinedCard({ combined }) {
   )
 
   const TABS = [
-    { id: 'density', label: 'd.1) Densidad T×HR' },
-    { id: 'habs',    label: 'd.2) Humedad absoluta' },
-    { id: 'psych',   label: 'd.3) Psicrométrico' },
-    { id: 'mobility',label: 'd) Movilidad flujo' },
+    { id: 'density',  label: 'd.1) Densidad conjunta f(HR,T)' },
+    { id: 'habs',     label: 'd.2) Humedad absoluta' },
+    { id: 'psych',    label: 'd.3) Diagrama psicrométrico' },
+    { id: 'mobility', label: 'd.4) Movilidad T×HR' },
   ]
 
-  const maxCount = combined.density?.length ? Math.max(...combined.density.map(d => d.count)) : 1
+  const rawPoints = combined.scatter?.length
+    ? combined.scatter.map(d => ({ T: d.T, HR: d.HR }))
+    : combined.density?.map(d => ({ T: d.T, HR: d.HR })) ?? []
+  const allT  = rawPoints.map(d => d.T)
+  const allHR = rawPoints.map(d => d.HR)
+  const tMin  = allT.length  ? Math.floor(Math.min(...allT) - 0.5)       : 0
+  const tMax  = allT.length  ? Math.ceil(Math.max(...allT) + 0.5)        : 40
+  const hrMin = allHR.length ? Math.max(0,   Math.floor(Math.min(...allHR) - 2)) : 0
+  const hrMax = allHR.length ? Math.min(100, Math.ceil(Math.max(...allHR) + 2))  : 100
+
+  const mobilityT = combined.mobility ?? []
 
   return (
     <div style={{ background: '#161a21', border: '1px solid #6366f130', borderTop: '3px solid #6366f1', borderRadius: 12, marginBottom: 24 }}>
@@ -486,47 +729,31 @@ function CombinedCard({ combined }) {
         ))}
       </div>
 
-      <div style={{ padding: '16px 20px' }}>
+      <div style={{ padding: '16px 20px' }} ref={containerRef}>
 
+        {/* d.1) Densidad conjunta f(HR,T) — mapa KDE (igual a Analysis) */}
         {tab === 'density' && (
           <div>
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
-              {[['90','#22c55e'],['95','#f59e0b'],['99','#ef4444'],['out','#5b6577']].map(([c, col]) => (
-                <span key={c} style={{ fontSize: 11, padding: '2px 8px', background: `${col}20`, color: col, borderRadius: 20 }}>
-                  {c === 'out' ? 'Fuera 99%' : `≤${c}%`}
-                </span>
-              ))}
-              <span style={{ fontSize: 11, padding: '2px 8px', background: '#f97316'+'20', color: '#f97316', borderRadius: 20 }}>
-                Humectación (T&gt;10°C, HR&gt;79%): {combined.humect_pct}%
-              </span>
+            <p style={{ fontSize: 11, color: '#5b6577', marginBottom: 10 }}>
+              Tiempo de humectación (T&gt;10°C y HR&gt;79%): {combined.humect_pct}% ({combined.humect_count} registros)
+            </p>
+            {rawPoints.length > 0 ? (
+              <KDEHeatmapSVG densityPoints={rawPoints} tMin={tMin} tMax={tMax} hrMin={hrMin} hrMax={hrMax}
+                width={svgW} height={Math.round(svgW * 0.62)} />
+            ) : (
+              <div style={{ color: '#5b6577', textAlign: 'center', padding: '2rem' }}>Sin datos de dispersión disponibles.</div>
+            )}
+            <div style={{ display: 'flex', gap: 14, marginTop: 12, flexWrap: 'wrap', fontSize: 11, alignItems: 'center' }}>
+              <div style={{ flex: 1, height: 10, borderRadius: 4, background: 'linear-gradient(to right, #440154, #31688e, #35b779, #fde725)' }} />
+              <span style={{ color: '#5b6577', minWidth: 120 }}>Menor densidad → Mayor densidad</span>
             </div>
-            <ResponsiveContainer width="100%" height={360}>
-              <ScatterChart margin={{ top: 8, right: 16, left: -10, bottom: 20 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#161a21" />
-                <XAxis dataKey="T"  name="T"  unit="°C" type="number" tick={{ fontSize: 10, fill: '#8b94a6' }}
-                  label={{ value: 'T (°C)', position: 'insideBottom', offset: -8, fontSize: 11, fill: '#8b94a6' }} />
-                <YAxis dataKey="HR" name="HR" unit="%" type="number" domain={[0,100]} tick={{ fontSize: 10, fill: '#8b94a6' }}
-                  label={{ value: 'HR (%)', angle: -90, position: 'insideLeft', fontSize: 11, fill: '#8b94a6' }} />
-                <Tooltip contentStyle={{ background: '#161a21', border: '1px solid #272d37', borderRadius: 8, fontSize: 12 }}
-                  formatter={(v,n) => [typeof v === 'number' ? v.toFixed(2) : v, n]} />
-                <ReferenceLine x={10} stroke="#f97316" strokeDasharray="4 2" label={{ value: 'T=10°C', fontSize: 9, fill: '#f97316' }} />
-                <ReferenceLine y={79} stroke="#f97316" strokeDasharray="4 2" label={{ value: 'HR=79%', fontSize: 9, fill: '#f97316', position: 'insideTopRight' }} />
-                {['90','95','99','out'].map(c => (
-                  <Scatter key={c} name={c === 'out' ? 'Fuera 99%' : `≤${c}%`}
-                    data={combined.density.filter(d => d.contour === c)}
-                    fill={c === '90' ? '#22c55e' : c === '95' ? '#f59e0b' : c === '99' ? '#ef4444' : '#5b6577'}
-                    fillOpacity={0.6}
-                  />
-                ))}
-              </ScatterChart>
-            </ResponsiveContainer>
           </div>
         )}
 
         {tab === 'habs' && (
           <div>
             <div style={{ marginBottom: 10, fontSize: 11, color: '#5b6577', fontFamily: 'monospace' }}>
-              H_abs = (18000/29) × (HR/100 × P_sat) / (P_tot − HR/100 × P_sat) &nbsp;·&nbsp; P_sat = f(T) &nbsp;·&nbsp; P_tot = f(altitud)
+              H_abs = 0.622 × (HR/100 × P_sat) / (P_tot − HR/100 × P_sat) × 1000 [g/kg] &nbsp;·&nbsp; P_sat = f(T) &nbsp;·&nbsp; P_tot = f(altitud)
             </div>
             <ResponsiveContainer width="100%" height={260}>
               <AreaChart data={combined.habs_monthly} margin={{ top: 4, right: 8, left: -10, bottom: 0 }}>
@@ -546,39 +773,95 @@ function CombinedCard({ combined }) {
           </div>
         )}
 
+        {/* d.3) Diagrama psicrométrico (Carrier) — igual a Analysis */}
         {tab === 'psych' && (
-          <ResponsiveContainer width="100%" height={340}>
-            <ScatterChart margin={{ top: 8, right: 16, left: 0, bottom: 20 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#161a21" />
-              <XAxis dataKey="T"    name="T"     unit="°C"    type="number" tick={{ fontSize: 10, fill: '#8b94a6' }}
-                label={{ value: 'T (°C)', position: 'insideBottom', offset: -8, fontSize: 11, fill: '#8b94a6' }} />
-              <YAxis dataKey="habs" name="H abs" unit=" g/kg" type="number" tick={{ fontSize: 10, fill: '#8b94a6' }}
-                label={{ value: 'H abs (g/kg)', angle: -90, position: 'insideLeft', fontSize: 10, fill: '#8b94a6' }} />
-              <Tooltip contentStyle={{ background: '#161a21', border: '1px solid #272d37', borderRadius: 8, fontSize: 12 }}
-                formatter={(v,n) => [typeof v === 'number' ? v.toFixed(3) : v, n]} />
-              <Scatter data={combined.scatter} name="T vs H abs" fill="#10b981" fillOpacity={0.3} />
-            </ScatterChart>
-          </ResponsiveContainer>
-        )}
-
-        {tab === 'mobility' && combined.mobility && (
           <div>
-            <p style={{ fontSize: 11, color: '#5b6577', marginBottom: 10 }}>
-              Distribución horaria de T media y HR durante el año (promedio por mes y hora del día)
-            </p>
-            <ResponsiveContainer width="100%" height={300}>
-              <ScatterChart margin={{ top: 8, right: 16, left: 0, bottom: 20 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#161a21" />
-                <XAxis dataKey="hora" name="Hora" type="number" domain={[0,23]} tick={{ fontSize: 10, fill: '#8b94a6' }}
-                  label={{ value: 'Hora del día', position: 'insideBottom', offset: -8, fontSize: 11, fill: '#8b94a6' }} />
-                <YAxis dataKey="T_avg" name="T media" unit="°C" tick={{ fontSize: 10, fill: '#8b94a6' }} />
-                <Tooltip contentStyle={{ background: '#161a21', border: '1px solid #272d37', borderRadius: 8, fontSize: 12 }}
-                  formatter={(v,n) => [typeof v === 'number' ? v.toFixed(2) : v, n]} />
-                <Scatter data={combined.mobility} name="Movilidad T" fill="#ef4444" fillOpacity={0.5} />
-              </ScatterChart>
-            </ResponsiveContainer>
+            <div style={{ marginBottom: 10, fontSize: 11, color: '#5b6577', fontFamily: 'monospace' }}>
+              ω = 0.622 · P_vap /(P_tot − P_vap) · 1000 [g/kg] · P_vap = HR/100 · P_sat(T)
+            </div>
+            <PsychrometricChartSVG scatter={combined.scatter} isoRh={combined.iso_rh}
+              humectCurve={combined.humect_curve?.[0]?.points} tMin={tMin} tMax={tMax}
+              width={svgW} height={Math.round(svgW * 0.6)} />
+            <div style={{ display: 'flex', gap: 16, marginTop: 12, flexWrap: 'wrap', fontSize: 11, alignItems: 'center' }}>
+              <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                <svg width="22" height="4"><line x1="0" y1="2" x2="22" y2="2" stroke="#38bdf8" strokeWidth="1.5"/></svg>
+                <span style={{ color: '#8b94a6' }}>HR constante</span>
+              </span>
+              <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                <svg width="22" height="4"><line x1="0" y1="2" x2="22" y2="2" stroke="#e0f2fe" strokeWidth="2.5"/></svg>
+                <span style={{ color: '#8b94a6' }}>Saturación (HR=100%)</span>
+              </span>
+              <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                <svg width="22" height="4"><line x1="0" y1="2" x2="22" y2="2" stroke="#f97316" strokeWidth="1.5" strokeDasharray="5,3"/></svg>
+                <span style={{ color: '#8b94a6' }}>Umbral humectación (T&gt;10°C, HR=79%)</span>
+              </span>
+              <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                <svg width="12" height="12"><circle cx="6" cy="6" r="3" fill="#22c55e" fillOpacity="0.6"/></svg>
+                <span style={{ color: '#8b94a6' }}>Mediciones</span>
+              </span>
+            </div>
           </div>
         )}
+
+        {/* d.4) Movilidad mes × hora — heatmap (igual a Analysis) */}
+        {tab === 'mobility' && mobilityT.length > 0 && (() => {
+          const matT  = Array.from({ length: 12 }, () => Array(24).fill(null))
+          const matHR = Array.from({ length: 12 }, () => Array(24).fill(null))
+          mobilityT.forEach(({ mes, hora, T_avg, HR_avg }) => {
+            matT [mes-1][hora] = T_avg
+            matHR[mes-1][hora] = HR_avg
+          })
+          const allTm  = mobilityT.map(d => d.T_avg)
+          const allHRm = mobilityT.map(d => d.HR_avg)
+          const tMinM = Math.min(...allTm),  tMaxM = Math.max(...allTm)
+          const hMinM = Math.min(...allHRm), hMaxM = Math.max(...allHRm)
+          return (
+            <div>
+              <p style={{ fontSize: 11, color: '#5b6577', marginBottom: 10 }}>
+                Temperatura y HR promedio por mes y hora del día
+              </p>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                {[
+                  { label: 'T promedio (°C)', mat: matT,  min: tMinM, max: tMaxM, type: 'TEMP', unit: '°C' },
+                  { label: 'HR promedio (%)', mat: matHR, min: hMinM, max: hMaxM, type: 'HR',   unit: '%'  },
+                ].map(({ label, mat, min, max, type, unit }) => (
+                  <div key={label} style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 12, color: '#8b94a6', marginBottom: 6, fontWeight: 600 }}>{label}</div>
+                    <div style={{ overflowX: 'auto' }}>
+                      <table style={{ borderCollapse: 'collapse', fontSize: 9 }}>
+                        <thead>
+                          <tr>
+                            <th style={{ padding: '2px 6px', color: '#5b6577', textAlign: 'left' }}>M\H</th>
+                            {HORAS.map(h => <th key={h} style={{ padding: '1px', color: '#5b6577', minWidth: 22 }}>{String(h).padStart(2,'0')}</th>)}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {MESES.map((m, mi) => (
+                            <tr key={m}>
+                              <td style={{ padding: '1px 6px', color: '#8b94a6', fontWeight: 600 }}>{m}</td>
+                              {HORAS.map(h => {
+                                const v = mat[mi][h]
+                                return (
+                                  <td key={h} title={v != null ? `${m} ${String(h).padStart(2,'0')}:00 → ${v}${unit}` : 'Sin dato'}
+                                    style={{ background: heatColorTH(v, min, max, type), height: 18, borderRadius: 1 }} />
+                                )
+                              })}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    <div style={{ display: 'flex', gap: 6, marginTop: 6, fontSize: 10, color: '#5b6577', alignItems: 'center' }}>
+                      <span>{min?.toFixed(1)}{unit}</span>
+                      <div style={{ flex: 1, height: 6, borderRadius: 3, background: type === 'TEMP' ? 'linear-gradient(to right,#3b82f6,#facc15,#ef4444)' : 'linear-gradient(to right,#f0f9ff,#1d4ed8)' }} />
+                      <span>{max?.toFixed(1)}{unit}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )
+        })()}
       </div>
     </div>
   )

@@ -541,6 +541,65 @@ def get_combined(
 ):
     import pandas as pd
     import numpy as np
+    import math
+
+    # ── Helpers psicrométricos (Velázquez Martí, UPV) ─────────────
+    # Coherentes con el diagrama psicrométrico Carrier. Todas las
+    # presiones en pascales (Pa).
+    #
+    #   Presión de vapor saturado (Antoine, inversa exacta de la
+    #   fórmula de temperatura de rocío de más abajo):
+    #     log10(P_sat) = (10.2858·T_K − 2148.49)/(T_K − 35.85)
+    #
+    #   Presión atmosférica según altitud (modelo barométrico ISA):
+    #     P_tot = 101325·(1 − 2.25577e-5·z)^5.2559
+    #
+    #   Humedad absoluta (relación de humedad):
+    #     ω = 0.622·P_vapor/(P_tot − P_vapor)   [kg vapor/kg aire seco]
+    #
+    #   Temperatura de rocío:
+    #     T_r = (35.85·log10(P_v) − 2148.49)/(log10(P_v) − 10.2858) − 273.15
+    #
+    #   Entalpía específica del aire húmedo:
+    #     h = 1.005·T + ω·(2503 + 1.86·T)        [kJ/kg aire seco]
+    def _p_sat_pa(t_c):
+        t_k = t_c + 273.15
+        return 10.0 ** ((10.2858 * t_k - 2148.49) / (t_k - 35.85))
+
+    def _humidity_ratio(t_c, hr_pct, p_total):
+        """ω en kg vapor/kg aire seco. None si no es físico."""
+        p_vap = (hr_pct / 100.0) * _p_sat_pa(t_c)
+        denom = p_total - p_vap
+        if denom <= 0:
+            return None
+        return 0.622 * p_vap / denom
+
+    def _dew_point_c(p_vap_pa):
+        if p_vap_pa is None or p_vap_pa <= 0:
+            return None
+        log_pv = math.log10(p_vap_pa)
+        denom = log_pv - 10.2858
+        if denom == 0:
+            return None
+        return (35.85 * log_pv - 2148.49) / denom - 273.15
+
+    def _iso_rh_curves(t_min, t_max, p_total, rh_levels, n=80):
+        """Curvas de HR constante: ω(T) sobre [t_min, t_max] para cada HR."""
+        curves = []
+        span = max(t_max - t_min, 1e-6)
+        for rh in rh_levels:
+            pts = []
+            for i in range(n + 1):
+                t = t_min + span * i / n
+                w = _humidity_ratio(t, rh, p_total)
+                if w is None:
+                    continue
+                pts.append({"T": round(t, 2), "habs": round(1000.0 * w, 4)})
+            if pts:
+                curves.append({"rh": rh, "points": pts})
+        return curves
+
+    p_tot = 101325.0 * (1 - 2.25577e-5 * altitude) ** 5.2559
 
     def _q(code):
         q = (
@@ -564,18 +623,20 @@ def get_combined(
         T = t_map.get(str(r.measured_at))
         if T is None:
             continue
-        HR      = float(r.value)
-        p_sat   = 9.066 * np.exp(0.0641 * T) - 1.796 * np.exp(0.0805 * T)
-        p_tot   = 1013.25 * (1 - 2.25577e-5 * altitude) ** 5.2559
-        hr_frac = HR / 100
-        denom   = p_tot - hr_frac * p_sat
-        h_abs   = (18000 / 29) * (hr_frac * p_sat) / denom if denom > 0 else None
-        ts      = r.measured_at
+        HR    = float(r.value)
+        p_vap = (HR / 100.0) * _p_sat_pa(T)
+        w     = _humidity_ratio(T, HR, p_tot)
+        h_abs = None if w is None else 1000.0 * w                 # g/kg aire seco
+        tr    = _dew_point_c(p_vap)                               # °C
+        h_ent = None if w is None else 1.005 * T + w * (2503 + 1.86 * T)  # kJ/kg as
+        ts    = r.measured_at
         joined.append({
             "measured_at": ts,
             "T":    T,
             "HR":   HR,
             "habs": round(h_abs, 4) if h_abs is not None else None,
+            "tr":   round(tr, 2)    if tr    is not None else None,
+            "h":    round(h_ent, 2) if h_ent is not None else None,
             "mes":  ts.month,
             "hora": ts.hour,
         })
@@ -644,9 +705,17 @@ def get_combined(
         for _, row in habs_monthly.iterrows()
     ]
 
+    scatter_cols = [c for c in ["T", "HR", "habs", "tr", "h", "mes", "hora"] if c in df.columns]
     scatter_sample = (
-        df[["T", "HR", "habs", "mes", "hora"]].dropna().head(2000).to_dict(orient="records")
+        df[scatter_cols].dropna(subset=["T", "HR", "habs"]).head(2000).to_dict(orient="records")
     )
+
+    # Curvas de HR constante para el diagrama psicrométrico (Carrier),
+    # cubriendo el rango de temperatura observado.
+    t_lo = math.floor(float(df["T"].min())) - 1
+    t_hi = math.ceil(float(df["T"].max())) + 1
+    iso_rh       = _iso_rh_curves(t_lo, t_hi, p_tot, rh_levels=[10, 20, 30, 40, 50, 60, 70, 80, 90, 100])
+    humect_curve = _iso_rh_curves(t_lo, t_hi, p_tot, rh_levels=[79])
 
     return {
         "density":      density,
@@ -656,5 +725,9 @@ def get_combined(
         "scatter":      scatter_sample,
         "mobility":     mobility,
         "total_paired": total_pts,
+        "iso_rh":       iso_rh,
+        "humect_curve": humect_curve,
+        "p_tot_pa":     round(p_tot, 1),
+        "altitude":     altitude,
     }
 
