@@ -212,6 +212,30 @@ function PsychrometricChartSVG({ scatter, isoRh, humectCurve, tMin, tMax, width,
 
     const plot = g.append('g').attr('clip-path', 'url(#mpsy-clip)')
 
+    // Mapa de densidad de los estados observados (reemplaza el scatter de puntos).
+    // Se dibuja primero, debajo de las curvas, para no taparlas.
+    const densityData = (scatter ?? []).filter(d => d.habs != null)
+    if (densityData.length) {
+      const contours = d3.contourDensity()
+        .x(d => xScale(d.T))
+        .y(d => yScale(d.habs))
+        .size([pw, ph])
+        .bandwidth(18)
+        .thresholds(24)(densityData)
+      const maxDensity = d3.max(contours, c => c.value) || 1
+      const colorScale = d3.scaleSequential(d3.interpolateViridis).domain([0, maxDensity])
+
+      plot.append('g').selectAll('path.psy-density').data(contours).join('path')
+        .attr('class', 'psy-density').attr('d', d3.geoPath())
+        .attr('fill', d => colorScale(d.value)).attr('stroke', 'none')
+
+      plot.append('g').selectAll('path.psy-density-line')
+        .data(contours.filter((_, i) => i % 3 === 0)).join('path')
+        .attr('class', 'psy-density-line').attr('d', d3.geoPath()).attr('fill', 'none')
+        .attr('stroke', d => colorScale(Math.min(d.value * 1.5, maxDensity)))
+        .attr('stroke-width', 0.6).attr('opacity', 0.7)
+    }
+
     ;(isoRh ?? []).forEach(curve => {
       const isSat = curve.rh === 100
       plot.append('path').datum(curve.points).attr('d', line).attr('fill', 'none')
@@ -238,12 +262,6 @@ function PsychrometricChartSVG({ scatter, isoRh, humectCurve, tMin, tMax, width,
       plot.append('path').datum(humectCurve).attr('d', line).attr('fill', 'none')
         .attr('stroke', '#f97316').attr('stroke-width', 1.2).attr('stroke-dasharray', '8,4').attr('opacity', 0.85)
     }
-
-    plot.append('g').selectAll('circle').data(scatter ?? []).join('circle')
-      .attr('cx', d => xScale(d.T)).attr('cy', d => yScale(d.habs)).attr('r', 2)
-      .attr('fill', '#22c55e').attr('opacity', 0.22)
-      .append('title').text(d => `T=${d.T}°C · HR=${d.HR}%\nH abs=${d.habs} g/kg`
-        + (d.tr != null ? ` · T rocío=${d.tr}°C` : '') + (d.h != null ? `\nEntalpía=${d.h} kJ/kg` : ''))
 
     g.append('g').attr('transform', `translate(0,${ph})`)
       .call(d3.axisBottom(xScale).ticks(10).tickFormat(d => d.toFixed(0)))
@@ -796,8 +814,8 @@ function CombinedCard({ combined }) {
                 <span style={{ color: '#8b94a6' }}>Umbral humectación (T&gt;10°C, HR=79%)</span>
               </span>
               <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-                <svg width="12" height="12"><circle cx="6" cy="6" r="3" fill="#22c55e" fillOpacity="0.6"/></svg>
-                <span style={{ color: '#8b94a6' }}>Mediciones</span>
+                <span style={{ width: 36, height: 8, borderRadius: 3, background: 'linear-gradient(to right, #440154, #31688e, #35b779, #fde725)' }} />
+                <span style={{ color: '#8b94a6' }}>Densidad de mediciones (menor → mayor)</span>
               </span>
             </div>
           </div>
