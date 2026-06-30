@@ -274,7 +274,12 @@ def _calc_distribution(
     logger.debug(f">>> iniciando ajuste {'beta' if is_hr else 'gaussian'}...")
     try:
         if is_hr:
-            components, r2, mse, fdp_fitted = _fit_beta_components(fdp, n_components=5)  # ← 5 como antes
+            # free_support libera el "entorno" [A,B] de cada beta (paso 1 del
+            # feedback): sobre la HR real baja el error acumulado ~29 % y sube
+            # R² a 0.995 sin curvas extra. Ver distribution_fitting._fit_beta_components.
+            components, r2, mse, fdp_fitted = _fit_beta_components(
+                fdp, n_components=5, free_support=True,
+            )
             dist_type = "beta"
         else:
             components, r2, mse, fdp_fitted = _fit_gaussian_components(fdp, n_components=2)  # ← 2 como antes

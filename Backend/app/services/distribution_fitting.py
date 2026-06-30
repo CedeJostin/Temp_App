@@ -183,9 +183,34 @@ def _fit_gaussian_components(
 def _fit_beta_components(
     fdp: list[dict],
     n_components: int = 5,
+    *,
+    free_support: bool = False,
+    sat_tail: bool = False,
+    extra_seed: float | None = None,
 ) -> tuple[list[dict], float | None, float | None, list[dict]]:
     """
     Ajusta n_components distribuciones Beta GENERALIZADAS a la FDP de HR.
+
+    Plan de prueba en dos pasos (feedback Sergio, error acumulado alto):
+
+      free_support : "libera el entorno" de cada beta. Por defecto los límites
+                     [A, B] y los parámetros α, β se buscan en ventanas estrechas
+                     alrededor de la región detectada (3 grados de libertad
+                     efectivos). Con free_support=True las ventanas de A/B se
+                     ensanchan y el piso de α, β baja a ~1.05, dando los 5 grados
+                     de libertad reales por curva que pide el feedback (paso 1).
+      sat_tail     : da más "cola" a la beta de saturación (HR→100 %): baja α y
+                     extiende su soporte izquierdo, para que la subida exponencial
+                     hacia 100 % arrastre una cola más larga hacia humedades
+                     menores en vez de concentrarse en los últimos grados.
+      extra_seed   : paso 2 condicional. Inyecta UNA beta extra centrada en este
+                     x (p. ej. 85.0, el "bache") con peso inicial bajo (~2.5 %) y
+                     deja que el optimizador la conserve o la "destruya" (w→0).
+                     Sube el nº de curvas a n_components+1 (mayor costo de cálculo).
+
+    NOTA de costo: cada curva son 5 variables (α, β, A, B, w). Con extra_seed o
+    free_support el espacio de búsqueda crece; el optimizador SLSQP escala
+    aprox. cuadráticamente con el nº de variables.
     """
     import numpy as np
     from scipy.stats import beta as beta_dist
@@ -279,12 +304,40 @@ def _fit_beta_components(
                 "B":    float(x_pct[min(n_pts - 1, idx + 4)]),
                 "mass": float(y_real[idx]),
             })
+
+    # ── Paso 2 (condicional): beta extra sembrada en `extra_seed` ─
+    # Se añade ADEMÁS de las n_components, con peso inicial bajo; el
+    # optimizador la conserva si reduce el error o la lleva a w≈0.
+    if extra_seed is not None and n_pts > 4:
+        near = any(abs(s["mode"] - extra_seed) <= 3.0 for s in segments)
+        idx  = int(np.argmin(np.abs(x_pct - extra_seed)))
+        if not near and all(idx != s["idx"] for s in segments):
+            lo = max(0, idx - 5)
+            hi = min(n_pts - 1, idx + 5)
+            segments.append({
+                "idx":  idx,
+                "mode": float(x_pct[idx]),
+                "A":    float(x_pct[lo]),
+                "B":    float(x_pct[hi]),
+                "mass": float(np.sum(y_real[lo:hi + 1])),
+                "extra": True,
+            })
+
     segments.sort(key=lambda s: s["mode"])
 
     peak_candidates = [s["idx"] for s in segments]
+    n_eff           = len(peak_candidates)
     seg_bounds      = {s["idx"]: (s["A"], s["B"]) for s in segments}
     total_mass      = sum(s["mass"] for s in segments) or 1.0
-    seg_w0          = {s["idx"]: max(s["mass"] / total_mass, 0.01) for s in segments}
+    # Peso inicial = masa de datos en su rango; la beta extra arranca con
+    # un peso bajo fijo (~2.5 %) para no "robar" masa a las curvas reales.
+    seg_w0          = {
+        s["idx"]: (0.025 if s.get("extra") else max(s["mass"] / total_mass, 0.01))
+        for s in segments
+    }
+    # Una curva con w en su cota inferior 0 puede ser "destruida" por el
+    # optimizador (paso 2); por defecto se conserva el piso 0.001 de antes.
+    w_lo = 0.0 if extra_seed is not None else 0.001
 
     def beta_gen_pdf(x_arr_pct, a, b, A, B):
         width = B - A
@@ -311,13 +364,16 @@ def _fit_beta_components(
 
     def cost(params: np.ndarray) -> float:
         weights = params[4::5]
-        if np.any(weights < 0.001):
+        # Pesos por debajo de su cota inferior son inviables. Con w_lo=0
+        # (modo paso 2) una curva puede anularse; el único guard duro es
+        # que la masa total siga siendo positiva para poder normalizar.
+        if np.any(weights < w_lo - 1e-12):
             return 1e9
         w_sum = float(np.sum(weights))
-        if w_sum <= 0:
+        if w_sum <= 1e-9:
             return 1e9
         p_norm = params.copy()
-        for i in range(n_components):
+        for i in range(n_eff):
             p_norm[5*i + 4] /= w_sum
         y_hat = model(p_norm)
         return float(np.mean((y_real - y_hat) ** 2))
@@ -377,18 +433,35 @@ def _fit_beta_components(
 
             if is_right_spike:
                 # Curva de saturación: Beta con beta<1 (sube hacia 100%, sin máximo)
-                a0 = max(concentration * 0.4, 4.0)
-                b0 = 0.5
-                A0 = min(A0, 90.0)
-                B0 = 101.0
-                p0_list.extend([a0, b0, A0, B0, w0])
-                bounds_list += [
-                    (1.1,   500.0),
-                    (0.05,  0.99),
-                    (80.0,  98.0),
-                    (100.5, 102.0),
-                    (0.001, 1.0),
-                ]
+                if sat_tail:
+                    # Más "cola": α menor y soporte izquierdo más extendido,
+                    # para arrastrar la subida hacia 100 % desde humedades
+                    # bastante menores en vez de pegarse a los últimos grados.
+                    a0 = max(concentration * 0.2, 2.0)
+                    b0 = 0.5
+                    A0 = min(A0, 78.0)
+                    B0 = 101.0
+                    p0_list.extend([a0, b0, A0, B0, w0])
+                    bounds_list += [
+                        (1.05,  500.0),
+                        (0.05,  0.99),
+                        (60.0,  95.0),
+                        (100.5, 102.0),
+                        (w_lo,  1.0),
+                    ]
+                else:
+                    a0 = max(concentration * 0.4, 4.0)
+                    b0 = 0.5
+                    A0 = min(A0, 90.0)
+                    B0 = 101.0
+                    p0_list.extend([a0, b0, A0, B0, w0])
+                    bounds_list += [
+                        (1.1,   500.0),
+                        (0.05,  0.99),
+                        (80.0,  98.0),
+                        (100.5, 102.0),
+                        (w_lo,  1.0),
+                    ]
 
             elif is_left_spike:
                 a0 = 0.5
@@ -401,7 +474,7 @@ def _fit_beta_components(
                     (1.1,  500.0),
                     (-1.0, 2.0),
                     (5.0,  20.0),
-                    (0.001, 1.0),
+                    (w_lo, 1.0),
                 ]
 
             else:
@@ -416,14 +489,20 @@ def _fit_beta_components(
                 m01 = float(np.clip((mode_pct - A0) / width, 0.05, 0.95))
                 var01 = estimate_var01(A0, B0, width)
                 a0, b0 = seed_ab(m01, var01)
-                # Piso mínimo: evita que la curva colapse a uniforme (α,β≈1),
-                # que se dibujaría como un rectángulo plano en vez de un pico.
-                a0 = max(a0, AB_MIN)
-                b0 = max(b0, AB_MIN)
+                # Piso de α,β. Se mantiene SIEMPRE en AB_MIN: bajarlo a ~1 deja
+                # que el optimizador colapse la curva a un rectángulo uniforme
+                # (peor ajuste). free_support libera el "entorno" [A,B], no la
+                # forma; α,β ya eran libres dentro de [AB_MIN, 500].
+                ab_floor = AB_MIN
+                a0 = max(a0, ab_floor)
+                b0 = max(b0, ab_floor)
                 p0_list.extend([a0, b0, A0, B0, w0])
 
-                # Margen de búsqueda alrededor de los límites detectados
-                search_margin = max(6.0, width * 0.35)
+                # Margen de búsqueda alrededor de los límites detectados.
+                # free_support ensancha la ventana de A/B ("libera el entorno").
+                margin_frac = 0.8 if free_support else 0.35
+                margin_min  = 12.0 if free_support else 6.0
+                search_margin = max(margin_min, width * margin_frac)
                 A_lo = max(0.0, A0 - search_margin)
                 A_hi = max(0.0, min(mode_pct - 1.0, A0 + search_margin * 0.5))
                 B_lo = max(mode_pct + 1.0, B0 - search_margin * 0.5)
@@ -435,11 +514,11 @@ def _fit_beta_components(
                     B_lo = min(B_hi - 1.0, mode_pct + 1.0)
 
                 bounds_list += [
-                    (AB_MIN, 500.0),
-                    (AB_MIN, 500.0),
-                    (A_lo,   A_hi),
-                    (B_lo,   B_hi),
-                    (0.001,  1.0),
+                    (ab_floor, 500.0),
+                    (ab_floor, 500.0),
+                    (A_lo,     A_hi),
+                    (B_lo,     B_hi),
+                    (w_lo,     1.0),
                 ]
 
         return np.array(p0_list, dtype=float), bounds_list
@@ -480,11 +559,11 @@ def _fit_beta_components(
     weights /= w_total
 
     params_norm = params_opt.copy()
-    for i in range(n_components):
+    for i in range(n_eff):
         params_norm[5*i + 4] = float(weights[i])
 
     y_components = []
-    for i in range(n_components):
+    for i in range(n_eff):
         a = float(abs(params_norm[5*i]))
         b = float(abs(params_norm[5*i + 1]))
         A = float(params_norm[5*i + 2])
@@ -496,7 +575,7 @@ def _fit_beta_components(
     y_model = sum(y_components)
 
     betas_out = []
-    for i in range(n_components):
+    for i in range(n_eff):
         a = float(abs(params_norm[5*i]))
         b = float(abs(params_norm[5*i + 1]))
         A = float(params_norm[5*i + 2])

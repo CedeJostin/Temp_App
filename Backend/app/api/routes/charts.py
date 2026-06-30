@@ -239,7 +239,12 @@ def get_stats_summary_table(
         if len(fdp) <= 4:
             row.update({"r2": None, "mse": None, "components": [], "quality": None})
         elif is_hr:
-            betas, r2, mse, fdp_fit = _fit_beta_components(fdp, n_components=n_components)
+            # free_support: libera el "entorno" [A,B] de cada beta (paso 1 del
+            # feedback). Verificado sobre la HR real de Belén: err_acum −29 %,
+            # R² 0.989→0.995, MSE −54 %, y elimina el bache de ajuste en ~82-85.
+            betas, r2, mse, fdp_fit = _fit_beta_components(
+                fdp, n_components=n_components, free_support=True,
+            )
             quality = _quality_flags(mse, r2, fdp_fit)
             w_sum   = round(sum(b["w"] for b in betas), 4)
             quality["weights_sum"]    = w_sum
