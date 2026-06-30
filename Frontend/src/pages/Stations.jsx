@@ -1,4 +1,5 @@
 import { useState } from "react"
+import { createPortal } from "react-dom"
 import { useFetch } from "../hooks/useFetch"
 import { stationsApi } from "../services/api"
 import { Plus, X, MapPin, Mountain, Building2, SatelliteDish } from "lucide-react"
@@ -97,8 +98,9 @@ export default function Stations() {
         </div>
       )}
 
-      {/* Modal nueva estación */}
-      {showModal && (
+      {/* Modal nueva estación — vía portal a document.body para que ningún
+          transform de un ancestro (.page) altere su position: fixed */}
+      {showModal && createPortal(
         <div className="modal-backdrop" onClick={() => setShowModal(false)}>
           <div className="modal" onClick={e => e.stopPropagation()}>
             <div className="modal__header">
@@ -141,7 +143,8 @@ export default function Stations() {
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   )
