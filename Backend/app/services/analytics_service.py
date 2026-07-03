@@ -275,10 +275,11 @@ def _calc_distribution(
     try:
         if is_hr:
             # free_support libera el "entorno" [A,B] de cada beta (paso 1 del
-            # feedback): sobre la HR real baja el error acumulado ~29 % y sube
-            # R² a 0.995 sin curvas extra. Ver distribution_fitting._fit_beta_components.
+            # feedback); censor_sat añade la censura XBX del spike de saturación
+            # en HR=100. Sobre la HR real: err_acum −30 %, R² 0.995, área 1.000.
+            # Ver distribution_fitting._fit_beta_components.
             components, r2, mse, fdp_fitted = _fit_beta_components(
-                fdp, n_components=5, free_support=True,
+                fdp, n_components=5, free_support=True, censor_sat=True,
             )
             dist_type = "beta"
         else:

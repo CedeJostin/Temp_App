@@ -187,6 +187,7 @@ def _fit_beta_components(
     free_support: bool = False,
     sat_tail: bool = False,
     extra_seed: float | None = None,
+    censor_sat: bool = False,
 ) -> tuple[list[dict], float | None, float | None, list[dict]]:
     """
     Ajusta n_components distribuciones Beta GENERALIZADAS a la FDP de HR.
@@ -207,6 +208,12 @@ def _fit_beta_components(
                      x (p. ej. 85.0, el "bache") con peso inicial bajo (~2.5 %) y
                      deja que el optimizador la conserve o la "destruya" (w→0).
                      Sube el nº de curvas a n_components+1 (mayor costo de cálculo).
+      censor_sat   : censura tipo "extended-support beta" (XBX, Zeileis et al.,
+                     JRSS-C 2026) para la curva de saturación: su soporte puede
+                     extenderse MÁS ALLÁ de 100 % y toda la masa latente por
+                     encima del último bin se apila EN el bin de 100 % (masa
+                     puntual de saturación), integrando por CDF en vez de
+                     pdf·paso. Modela el spike de HR=100 sin perder área.
 
     NOTA de costo: cada curva son 5 variables (α, β, A, B, w). Con extra_seed o
     free_support el espacio de búsqueda crece; el optimizador SLSQP escala
@@ -339,6 +346,17 @@ def _fit_beta_components(
     # optimizador (paso 2); por defecto se conserva el piso 0.001 de antes.
     w_lo = 0.0 if extra_seed is not None else 0.001
 
+    # ── Marcar qué componente es la curva de saturación ──────────
+    # (misma regla que usa build_init; alineado con peak_candidates)
+    x_last = float(x_pct[-1])
+    sat_flags: list[bool] = []
+    for pk in peak_candidates:
+        m_pct = float(x_pct[min(pk, n_pts - 1)])
+        _, B_sg = seg_bounds[pk]
+        sat_flags.append(
+            (m_pct >= 97.0) or (B_sg >= x_last - 1e-6 and m_pct >= 90.0)
+        )
+
     def beta_gen_pdf(x_arr_pct, a, b, A, B):
         width = B - A
         if width <= 0:
@@ -350,6 +368,27 @@ def _fit_beta_components(
             pdf[mask] = beta_dist.pdf(x01[mask], a, b) / width
         return pdf
 
+    # Bordes izquierdos de cada bin (para integrar por CDF)
+    edges_left = x_pct - paso / 2.0
+
+    def beta_sat_censored(a, b, A, B):
+        """
+        Masa por bin de la beta de saturación con censura al borde (XBX):
+        se integra la CDF entre bordes de bin y TODA la masa latente por
+        encima del borde izquierdo del último bin (incluida la que cae más
+        allá de 100 %, hasta B) se apila en el último bin. Devuelve masa
+        por bin (misma escala que pdf·paso).
+        """
+        width = B - A
+        if width <= 0:
+            return np.zeros_like(x_pct, dtype=float)
+        t = np.clip((edges_left - A) / width, 0.0, 1.0)
+        cdf = beta_dist.cdf(t, a, b)
+        masses = np.empty_like(cdf)
+        masses[:-1] = np.diff(cdf)
+        masses[-1]  = 1.0 - cdf[-1]   # censura: masa puntual de saturación
+        return masses
+
     def model(params: np.ndarray) -> np.ndarray:
         out = np.zeros(len(x_pct), dtype=float)
         n = len(params) // 5
@@ -359,7 +398,10 @@ def _fit_beta_components(
             A = params[5*i + 2]
             B = params[5*i + 3]
             w = params[5*i + 4]
-            out += w * beta_gen_pdf(x_pct, a, b, A, B) * paso
+            if censor_sat and sat_flags[i]:
+                out += w * beta_sat_censored(a, b, A, B)
+            else:
+                out += w * beta_gen_pdf(x_pct, a, b, A, B) * paso
         return out
 
     def cost(params: np.ndarray) -> float:
@@ -428,10 +470,35 @@ def _fit_beta_components(
             A0 = max(A0, 0.0)
             B0 = min(B0, 101.0)
 
-            is_right_spike = (mode_pct >= 97.0) or (B_seg >= float(x_pct[-1]) - 1e-6 and mode_pct >= 90.0)
+            is_right_spike = sat_flags[k]
             is_left_spike  = mode_pct <= 3.0
 
-            if is_right_spike:
+            if is_right_spike and censor_sat:
+                # Saturación con censura XBX: la beta latente puede tener su
+                # masa (incluso su moda) MÁS ALLÁ de 100 %; lo que excede el
+                # último bin se censura como masa puntual en 100 %. Por eso
+                # b puede ser ≥1 y B se extiende bastante sobre 100.
+                # La semilla varía con cada reinicio (`concentration`) para
+                # explorar formas distintas: subida pura (b<1), campana
+                # interior y campana con moda latente más allá de 100.
+                sat_seeds = {
+                    10.0:  (3.0, 0.8, 85.0, 104.0),
+                    30.0:  (2.0, 2.0, 80.0, 106.0),
+                    80.0:  (8.0, 0.5, 88.0, 102.0),
+                    200.0: (1.5, 1.2, 75.0, 110.0),
+                }
+                a0, b0, A_cap, B0 = sat_seeds.get(concentration, (3.0, 0.8, 85.0, 104.0))
+                A0 = min(A0, A_cap)
+                p0_list.extend([a0, b0, A0, B0, w0])
+                bounds_list += [
+                    (1.05,  500.0),
+                    (0.05,  5.0),
+                    (60.0,  98.0),
+                    (100.5, 115.0),
+                    (w_lo,  1.0),
+                ]
+
+            elif is_right_spike:
                 # Curva de saturación: Beta con beta<1 (sube hacia 100%, sin máximo)
                 if sat_tail:
                     # Más "cola": α menor y soporte izquierdo más extendido,
@@ -569,7 +636,10 @@ def _fit_beta_components(
         A = float(params_norm[5*i + 2])
         B = float(params_norm[5*i + 3])
         w = float(params_norm[5*i + 4])
-        y_comp = w * beta_gen_pdf(x_pct, a, b, A, B) * paso
+        if censor_sat and sat_flags[i]:
+            y_comp = w * beta_sat_censored(a, b, A, B)
+        else:
+            y_comp = w * beta_gen_pdf(x_pct, a, b, A, B) * paso
         y_components.append(y_comp)
 
     y_model = sum(y_components)

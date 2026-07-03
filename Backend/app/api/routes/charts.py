@@ -240,10 +240,13 @@ def get_stats_summary_table(
             row.update({"r2": None, "mse": None, "components": [], "quality": None})
         elif is_hr:
             # free_support: libera el "entorno" [A,B] de cada beta (paso 1 del
-            # feedback). Verificado sobre la HR real de Belén: err_acum −29 %,
-            # R² 0.989→0.995, MSE −54 %, y elimina el bache de ajuste en ~82-85.
+            # feedback). censor_sat: censura tipo XBX (JRSS-C 2026) para el
+            # spike de saturación en HR=100. Verificado sobre la HR real de
+            # Belén: err_acum −30 %, R² 0.989→0.995, área modelo 1.000 y el
+            # bin de 100 % clavado (resid 1.4e-4); elimina el bache en ~82-85.
             betas, r2, mse, fdp_fit = _fit_beta_components(
-                fdp, n_components=n_components, free_support=True,
+                fdp, n_components=n_components,
+                free_support=True, censor_sat=True,
             )
             quality = _quality_flags(mse, r2, fdp_fit)
             w_sum   = round(sum(b["w"] for b in betas), 4)
