@@ -58,6 +58,9 @@ export const measurementsApi = {
   heatmap: (p = {}) =>
     req(`/measurements/heatmap?${new URLSearchParams(clean(p))}`),
 
+  dailyPeaks: (p = {}) =>                                                // ← nuevo (RF-03/04)
+    req(`/measurements/daily-peaks?${new URLSearchParams(clean(p))}`),
+
   dailyProfile: (p = {}) =>                                               // ← nuevo
     req(`/measurements/daily-profile?${new URLSearchParams(clean(p))}`),
 

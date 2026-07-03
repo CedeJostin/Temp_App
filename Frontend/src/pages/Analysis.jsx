@@ -18,9 +18,11 @@ const TABS = [
   { id: 'overview',       label: 'a) Visualización general'   },
   { id: 'fdp',            label: 'b) FDP'                     },
   { id: 'summary-table',  label: 'b.1) Tabla resumen'         },
+  { id: 'data-table',     label: 'b.2) Tabla base'            },
   { id: 'isolines',       label: 'c.1) Mapa de calor'         },
   { id: 'daily-profile',  label: 'c.2) Perfil diario'         },
   { id: 'annual-profile', label: 'c.3) Perfil anual'          },
+  { id: 'daily-peaks',    label: 'c.4) Picos máximos'         },
   { id: 'combined',       label: 'd) T × HR combinado'        },
 ]
 
@@ -225,19 +227,29 @@ const QualityBadge = ({ quality }) => {
 }
 
 // ── Mapa de calor ─────────────────────────────────────────────
+// RF-05/RF-10: rampas multi-parada con más degradado y contraste.
+// TEMP: azul profundo → cian → lima → amarillo → naranja → rojo (térmica).
+// HR:   ámbar (seco) → lima → cian → azul → índigo (húmedo).
 const lerp = (a, b, t) => Math.round(a + (b - a) * t)
+
+const HEAT_STOPS = {
+  TEMP: [[30,58,138],[59,130,246],[34,211,238],[132,204,22],[250,204,21],[249,115,22],[220,38,38]],
+  HR:   [[253,230,138],[163,230,53],[34,211,238],[59,130,246],[67,56,202],[49,46,129]],
+}
+const HEAT_GRADIENT_CSS = {
+  TEMP: 'linear-gradient(to right,#1e3a8a,#3b82f6,#22d3ee,#84cc16,#facc15,#f97316,#dc2626)',
+  HR:   'linear-gradient(to right,#fde68a,#a3e635,#22d3ee,#3b82f6,#4338ca,#312e81)',
+}
 
 const heatColor = (val, min, max, type) => {
   if (val == null) return '#161a21'
+  const stops = HEAT_STOPS[type] ?? HEAT_STOPS.TEMP
   const t = max > min ? Math.max(0, Math.min(1, (val - min) / (max - min))) : 0
-  if (type === 'TEMP') {
-    const r = t < 0.5 ? lerp(59, 250, t*2)  : lerp(250, 220, (t-0.5)*2)
-    const g = t < 0.5 ? lerp(130, 204, t*2) : lerp(204, 38,  (t-0.5)*2)
-    const b = t < 0.5 ? lerp(246, 20, t*2)  : lerp(20, 38,   (t-0.5)*2)
-    return `rgb(${r},${g},${b})`
-  }
-  const r = lerp(240, 30, t), g = lerp(249, 64, t), bl = lerp(255, 175, t)
-  return `rgb(${r},${g},${bl})`
+  const x = t * (stops.length - 1)
+  const i = Math.min(Math.floor(x), stops.length - 2)
+  const f = x - i
+  const [r, g, b] = stops[i].map((c, j) => lerp(c, stops[i + 1][j], f))
+  return `rgb(${r},${g},${b})`
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -1164,7 +1176,8 @@ function SectionIsolines({ stationId, dateFrom, dateTo }) {
     try {
       const [th, hh, tm, hm] = await Promise.all([
         measurementsApi.heatmap({ station_id: stationId, variable_code: 'TEMP', group_by: groupBy, date_from: dateFrom, date_to: dateTo }),
-        measurementsApi.heatmap({ station_id: stationId, variable_code: 'HR',   group_by: groupBy, date_from: dateFrom, date_to: dateTo }),
+        // RF-10: la HR por promedio queda plana; se pide la moda por celda
+        measurementsApi.heatmap({ station_id: stationId, variable_code: 'HR',   group_by: groupBy, stat: 'mode', date_from: dateFrom, date_to: dateTo }),
         measurementsApi.byDate({ station_id: stationId, variable_code: 'TEMP', group_by: 'month', date_from: dateFrom, date_to: dateTo }),
         measurementsApi.byDate({ station_id: stationId, variable_code: 'HR',   group_by: 'month', date_from: dateFrom, date_to: dateTo }),
       ])
@@ -1199,7 +1212,7 @@ function SectionIsolines({ stationId, dateFrom, dateTo }) {
     if (!built || !hm) return null
     const { mat, ejeRange } = built
     return (
-      <SectionCard title={`Mapa de calor — ${type === 'TEMP' ? 'Temperatura' : 'Humedad Relativa'} (mes × ${groupBy === 'week' ? 'semana' : 'hora'})`}>
+      <SectionCard title={`Mapa de calor — ${type === 'TEMP' ? 'Temperatura (promedio' : 'Humedad Relativa (moda'}, mes × ${groupBy === 'week' ? 'semana' : 'hora'})`}>
         <div style={{ overflowX: 'auto' }}>
           <table style={{ borderCollapse: 'collapse', fontSize: 10 }}>
             <thead>
@@ -1232,7 +1245,7 @@ function SectionIsolines({ stationId, dateFrom, dateTo }) {
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 10, fontSize: 11, color: '#5b6577' }}>
           <span>{hm.min?.toFixed(1)}{unit}</span>
-          <div style={{ flex: 1, height: 8, borderRadius: 4, background: type === 'TEMP' ? 'linear-gradient(to right,#3b82f6,#facc15,#ef4444)' : 'linear-gradient(to right,#f0f9ff,#1d4ed8)' }} />
+          <div style={{ flex: 1, height: 8, borderRadius: 4, background: HEAT_GRADIENT_CSS[type] ?? HEAT_GRADIENT_CSS.TEMP }} />
           <span>{hm.max?.toFixed(1)}{unit}</span>
         </div>
       </SectionCard>
@@ -1996,6 +2009,365 @@ function SectionCombined({ stationId, stationAlt, dateFrom, dateTo }) {
 }
 
 // ══════════════════════════════════════════════════════════════
+// SECTION B.2 — Tabla base (RF-02): año · mes · día · hora · valor
+// ══════════════════════════════════════════════════════════════
+const TABLE_PAGE_SIZE = 100
+
+// Parte "2015-03-21 14:00:00" (o ISO con T) sin pasar por Date():
+// evita corrimientos de zona horaria.
+const splitMeasuredAt = (s) => {
+  const [d = '', t = ''] = String(s || '').split(/[T ]/)
+  const [y = '', mo = '', da = ''] = d.split('-')
+  return { y, mo, da, h: t.slice(0, 2) }
+}
+
+function SectionDataTable({ stationId, stationName, dateFrom, dateTo }) {
+  const [variable, setVariable] = useState('TEMP')
+  const [order,    setOrder]    = useState('asc')
+  const [page,     setPage]     = useState(0)
+  const [data,     setData]     = useState(null)
+  const [loading,  setLoading]  = useState(false)
+  const [error,    setError]    = useState(null)
+  const [csvBusy,  setCsvBusy]  = useState(false)
+
+  const unit = variable === 'HR' ? '%' : '°C'
+
+  const load = useCallback(async () => {
+    if (!stationId) return
+    setLoading(true); setError(null)
+    try {
+      const r = await measurementsApi.list({
+        station_id:    stationId,
+        variable_code: variable,
+        date_from:     dateFrom,
+        date_to:       dateTo,
+        limit:         TABLE_PAGE_SIZE,
+        offset:        page * TABLE_PAGE_SIZE,
+        order,
+      })
+      setData(r)
+    } catch (e) { setError(e.message) }
+    finally { setLoading(false) }
+  }, [stationId, variable, order, page, dateFrom, dateTo])
+
+  useEffect(() => { load() }, [load])
+
+  const total    = data?.total ?? 0
+  const lastPage = Math.max(0, Math.ceil(total / TABLE_PAGE_SIZE) - 1)
+  const rows     = data?.data ?? []
+
+  // CSV de todo el rango consultado (fetch por bloques de 50 000)
+  const exportCSV = async () => {
+    if (csvBusy || !stationId) return
+    setCsvBusy(true)
+    try {
+      const CHUNK = 50000
+      let all = [], offset = 0, tot = Infinity
+      while (offset < tot) {
+        const r = await measurementsApi.list({
+          station_id:    stationId,
+          variable_code: variable,
+          date_from:     dateFrom,
+          date_to:       dateTo,
+          limit:         CHUNK,
+          offset,
+          order,
+        })
+        tot = r.total
+        all = all.concat(r.data ?? [])
+        offset += CHUNK
+        if (!r.data?.length) break
+      }
+      const lines = ['año,mes,día,hora,valor']
+      all.forEach(m => {
+        const p = splitMeasuredAt(m.measured_at)
+        lines.push(`${p.y},${p.mo},${p.da},${p.h},${m.value}`)
+      })
+      // BOM para que Excel abra el UTF-8 con tildes correctas
+      const bom  = String.fromCharCode(0xFEFF)
+      const blob = new Blob([bom + lines.join('\n')], { type: 'text/csv;charset=utf-8' })
+      const url  = URL.createObjectURL(blob)
+      const a    = document.createElement('a')
+      a.href = url
+      a.download = `tabla_base_${slugify(stationName || 'estacion')}_${variable}.csv`
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch (e) { setError(e.message) }
+    finally { setCsvBusy(false) }
+  }
+
+  const pill = (active) => ({
+    padding: '5px 16px', borderRadius: 20, border: '1px solid', fontSize: 13, cursor: 'pointer',
+    background:  active ? 'var(--accent)' : 'transparent',
+    borderColor: active ? 'var(--accent)' : '#272d37',
+    color:       active ? 'var(--accent-fg)' : '#8b94a6',
+  })
+  const pagBtn = (disabled) => ({
+    padding: '6px 14px', borderRadius: 8, border: '1px solid #272d37', fontSize: 12, fontWeight: 600,
+    background: '#0f1217', color: disabled ? '#353d4a' : '#8b94a6',
+    cursor: disabled ? 'not-allowed' : 'pointer',
+  })
+  const thStyle = { padding: '8px 12px', fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.04em', color: '#8b94a6', borderBottom: '1px solid #272d37', textAlign: 'right' }
+  const tdStyle = { padding: '6px 12px', borderBottom: '1px solid #1c2129', color: '#e7eaf0', textAlign: 'right', fontVariantNumeric: 'tabular-nums' }
+
+  return (
+    <>
+      <Card style={{ padding: '12px 20px', marginBottom: 16 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 13, color: '#8b94a6', fontWeight: 600 }}>Variable:</span>
+          {[['TEMP', 'Temperatura'], ['HR', 'Humedad relativa']].map(([v, l]) => (
+            <button key={v} onClick={() => { setVariable(v); setPage(0) }} style={pill(variable === v)}>{l}</button>
+          ))}
+          <span style={{ fontSize: 13, color: '#8b94a6', fontWeight: 600, marginLeft: 12 }}>Orden:</span>
+          {[['asc', 'Más antiguo primero'], ['desc', 'Más reciente primero']].map(([v, l]) => (
+            <button key={v} onClick={() => { setOrder(v); setPage(0) }} style={pill(order === v)}>{l}</button>
+          ))}
+          <button
+            onClick={exportCSV}
+            disabled={csvBusy || !total}
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 6, marginLeft: 'auto',
+              padding: '6px 14px', borderRadius: 8, border: '1px solid #272d37',
+              background: '#0f1217', color: (csvBusy || !total) ? '#5b6577' : '#8b94a6',
+              fontSize: 12, fontWeight: 600, cursor: (csvBusy || !total) ? 'not-allowed' : 'pointer',
+            }}
+          >
+            {csvBusy ? <Loader2 size={13} style={SPIN} /> : <Download size={13} />}
+            {csvBusy ? 'Descargando todo el rango…' : 'CSV (todo el rango)'}
+          </button>
+        </div>
+      </Card>
+
+      <SectionCard
+        title={`b.2) Tabla base — ${variable === 'HR' ? 'Humedad Relativa' : 'Temperatura'}`}
+        subtitle={total
+          ? `${total.toLocaleString()} registros · página ${page + 1} de ${lastPage + 1} · columnas: año · mes · día · hora · valor`
+          : 'Columnas: año · mes · día · hora · valor'}
+      >
+        {error && <Err msg={error} />}
+        {loading ? <Spinner /> : rows.length > 0 ? (
+          <>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, background: '#161a21' }}>
+              <thead>
+                <tr>
+                  <th style={{ ...thStyle, textAlign: 'left' }}>Año</th>
+                  <th style={thStyle}>Mes</th>
+                  <th style={thStyle}>Día</th>
+                  <th style={thStyle}>Hora</th>
+                  <th style={thStyle}>Valor ({unit})</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map(m => {
+                  const p = splitMeasuredAt(m.measured_at)
+                  return (
+                    <tr key={m.id}>
+                      <td style={{ ...tdStyle, textAlign: 'left', color: '#8b94a6' }}>{p.y}</td>
+                      <td style={tdStyle}>{p.mo}</td>
+                      <td style={tdStyle}>{p.da}</td>
+                      <td style={tdStyle}>{p.h}:00</td>
+                      <td style={{ ...tdStyle, fontWeight: 600 }}>{m.value}</td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+            <div data-html2canvas-ignore style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 12, flexWrap: 'wrap', gap: 8 }}>
+              <span style={{ fontSize: 12, color: '#5b6577' }}>
+                Mostrando {(page * TABLE_PAGE_SIZE + 1).toLocaleString()}–{(page * TABLE_PAGE_SIZE + rows.length).toLocaleString()} de {total.toLocaleString()}
+              </span>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button disabled={page === 0} onClick={() => setPage(pp => Math.max(0, pp - 1))} style={pagBtn(page === 0)}>‹ Anterior</button>
+                <button disabled={page >= lastPage} onClick={() => setPage(pp => Math.min(lastPage, pp + 1))} style={pagBtn(page >= lastPage)}>Siguiente ›</button>
+              </div>
+            </div>
+          </>
+        ) : (
+          <div style={{ textAlign: 'center', color: '#5b6577', padding: '2rem' }}>
+            Sin mediciones para los filtros seleccionados.
+          </div>
+        )}
+      </SectionCard>
+    </>
+  )
+}
+
+// ══════════════════════════════════════════════════════════════
+// SECTION C.4 — Picos máximos diarios (RF-03 / RF-04)
+// X = día del año, Y = hora. Densidad de color = dónde se concentran
+// los máximos diarios; puntos = un máximo por día por gaussiana.
+// ══════════════════════════════════════════════════════════════
+const DOY_MONTH_START = [1, 32, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335]
+
+function DailyPeaksSVG({ clipId, dailyMax, components, unit, width, height }) {
+  const svgRef = useRef(null)
+
+  useEffect(() => {
+    if (!svgRef.current || !dailyMax?.length) return
+
+    const pad = { top: 16, right: 18, bottom: 48, left: 64 }
+    const pw  = width  - pad.left - pad.right
+    const ph  = height - pad.top  - pad.bottom
+    if (pw <= 0 || ph <= 0) return
+
+    const xScale = d3.scaleLinear().domain([1, 366]).range([0, pw])
+    const yScale = d3.scaleLinear().domain([-0.5, 23.5]).range([ph, 0])
+
+    const svg = d3.select(svgRef.current)
+    svg.selectAll('*').remove()
+    svg.append('defs').append('clipPath').attr('id', clipId)
+      .append('rect').attr('width', pw).attr('height', ph)
+
+    const g = svg.append('g').attr('transform', `translate(${pad.left},${pad.top})`)
+    g.append('rect').attr('width', pw).attr('height', ph).attr('fill', '#0a0a14')
+
+    const plot = g.append('g').attr('clip-path', `url(#${clipId})`)
+
+    // Densidad de los máximos diarios (todos los años superpuestos)
+    const contours = d3.contourDensity()
+      .x(d => xScale(d.doy))
+      .y(d => yScale(d.hour))
+      .size([pw, ph])
+      .bandwidth(16)
+      .thresholds(20)(dailyMax)
+    const maxDensity = d3.max(contours, c => c.value) || 1
+    const colorScale = d3.scaleSequential(d3.interpolateViridis).domain([0, maxDensity])
+
+    plot.append('g').selectAll('path').data(contours).join('path')
+      .attr('d', d3.geoPath())
+      .attr('fill', d => colorScale(d.value))
+      .attr('stroke', 'none')
+
+    // Separadores y etiquetas de mes
+    DOY_MONTH_START.forEach((d0, i) => {
+      if (i > 0) {
+        const x = xScale(d0)
+        plot.append('line').attr('x1', x).attr('x2', x).attr('y1', 0).attr('y2', ph)
+          .attr('stroke', '#272d37').attr('stroke-dasharray', '2,4').attr('opacity', 0.7)
+      }
+      g.append('text').attr('x', xScale(d0 + 14)).attr('y', ph + 16)
+        .attr('fill', '#8b94a6').attr('font-size', 10).attr('text-anchor', 'middle')
+        .text(MONTHS[i])
+    })
+
+    // RF-04: un punto por día por gaussiana (sin promediar)
+    ;(components ?? []).forEach((c, k) => {
+      plot.append('g').selectAll('circle').data(c.points ?? []).join('circle')
+        .attr('cx', d => xScale(d.doy))
+        .attr('cy', d => yScale(d.hour))
+        .attr('r', 1.5)
+        .attr('fill', GAUSS_COLORS[k % GAUSS_COLORS.length])
+        .attr('opacity', 0.4)
+        .append('title')
+        .text(d => `${d.date} · máx ${d.value}${unit} a las ${String(d.hour).padStart(2, '0')}:00 (G${c.comp})`)
+    })
+
+    // Ejes
+    g.append('g')
+      .call(d3.axisLeft(yScale).tickValues([0, 4, 8, 12, 16, 20, 23]).tickFormat(h => `${String(h).padStart(2, '0')}:00`))
+      .call(ax => ax.select('.domain').attr('stroke', '#3a424f'))
+      .call(ax => ax.selectAll('.tick line').attr('stroke', '#3a424f'))
+      .call(ax => ax.selectAll('.tick text').attr('fill', '#8b94a6').attr('font-size', 10).attr('font-family', 'monospace'))
+
+    g.append('text').attr('x', pw / 2).attr('y', ph + 38)
+      .attr('fill', '#c2c9d6').attr('font-size', 13).attr('text-anchor', 'middle')
+      .text('Día del año (mes)')
+    g.append('text').attr('transform', 'rotate(-90)')
+      .attr('x', -ph / 2).attr('y', -48)
+      .attr('fill', '#c2c9d6').attr('font-size', 13).attr('text-anchor', 'middle')
+      .text('Hora del día')
+
+    g.append('rect').attr('width', pw).attr('height', ph)
+      .attr('fill', 'none').attr('stroke', '#3a424f').attr('stroke-width', 0.8)
+  }, [clipId, dailyMax, components, unit, width, height])
+
+  return <svg ref={svgRef} width={width} height={height} style={{ display: 'block', width: '100%', borderRadius: 8 }} />
+}
+
+function SectionDailyPeaks({ stationId, dateFrom, dateTo }) {
+  const [tPeaks,  setTPeaks]  = useState(null)
+  const [hPeaks,  setHPeaks]  = useState(null)
+  const [loading, setLoading] = useState(false)
+  const [error,   setError]   = useState(null)
+  const [svgW,    setSvgW]    = useState(700)
+  const containerRef = useRef(null)
+
+  useEffect(() => {
+    if (!containerRef.current) return
+    const ro = new ResizeObserver(entries => {
+      const w = entries[0]?.contentRect?.width
+      if (w > 0) setSvgW(Math.floor(w))
+    })
+    ro.observe(containerRef.current)
+    return () => ro.disconnect()
+  }, [])
+
+  const load = useCallback(async () => {
+    if (!stationId) return
+    setLoading(true); setError(null)
+    try {
+      const [t, h] = await Promise.all([
+        measurementsApi.dailyPeaks({ station_id: stationId, variable_code: 'TEMP', date_from: dateFrom, date_to: dateTo }),
+        measurementsApi.dailyPeaks({ station_id: stationId, variable_code: 'HR',   date_from: dateFrom, date_to: dateTo }),
+      ])
+      setTPeaks(t); setHPeaks(h)
+    } catch (e) { setError(e.message) }
+    finally { setLoading(false) }
+  }, [stationId, dateFrom, dateTo])
+
+  useEffect(() => { load() }, [load])
+
+  if (loading) return <Spinner />
+  if (error)   return <Err msg={error} />
+  if (!tPeaks && !hPeaks) return null
+
+  const gradLegend = (
+    <div style={{ display: 'flex', gap: 14, marginTop: 12, flexWrap: 'wrap', fontSize: 11, alignItems: 'center' }}>
+      <div style={{ flex: 1, minWidth: 160, height: 10, borderRadius: 4, background: 'linear-gradient(to right, #440154, #31688e, #35b779, #fde725)' }} />
+      <span style={{ color: '#5b6577' }}>Menor densidad de máximos → Mayor densidad</span>
+    </div>
+  )
+
+  return (
+    <div ref={containerRef} style={{ width: '100%' }}>
+      {tPeaks?.daily_max?.length > 0 && (
+        <SectionCard
+          title="c.4.a) Picos de Temperatura — hora del máximo diario vs día del año"
+          subtitle={`${tPeaks.n_days} días analizados · un punto por día por gaussiana (sin promediar)`}
+        >
+          <DailyPeaksSVG clipId="peaks-clip-t" dailyMax={tPeaks.daily_max} components={tPeaks.components} unit="°C"
+            width={svgW} height={Math.round(svgW * 0.48)} />
+          {gradLegend}
+          {tPeaks.components?.length > 0 && (
+            <div style={{ display: 'flex', gap: 16, marginTop: 8, flexWrap: 'wrap', fontSize: 11, alignItems: 'center' }}>
+              {tPeaks.components.map((c, k) => (
+                <span key={c.comp} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                  <span style={{ width: 10, height: 10, borderRadius: '50%', background: GAUSS_COLORS[k % GAUSS_COLORS.length] }} />
+                  <span style={{ color: '#8b94a6' }}>
+                    Gaussiana {c.comp} (μ={c.mu}°C · w={((c.w ?? 0) * 100).toFixed(1)}%)
+                  </span>
+                </span>
+              ))}
+            </div>
+          )}
+        </SectionCard>
+      )}
+
+      {hPeaks?.daily_max?.length > 0 && (
+        <SectionCard
+          title="c.4.b) Picos de Humedad Relativa — hora del máximo diario vs día del año"
+          subtitle={`${hPeaks.n_days} días analizados · densidad de dónde cae el máximo diario de HR`}
+        >
+          <DailyPeaksSVG clipId="peaks-clip-h" dailyMax={hPeaks.daily_max} components={[]} unit="%"
+            width={svgW} height={Math.round(svgW * 0.48)} />
+          {gradLegend}
+        </SectionCard>
+      )}
+    </div>
+  )
+}
+
+// ══════════════════════════════════════════════════════════════
 // PÁGINA PRINCIPAL
 // ══════════════════════════════════════════════════════════════
 export default function Analysis() {
@@ -2098,9 +2470,11 @@ export default function Analysis() {
           {activeTab === 'overview'       && <SectionOverview      stationId={stationId} dateFrom={dateFrom || undefined} dateTo={dateTo || undefined} />}
           {activeTab === 'fdp'            && <SectionFDP           stationId={stationId} dateFrom={dateFrom || undefined} dateTo={dateTo || undefined} />}
           {activeTab === 'summary-table'  && <SectionSummaryTable  stationId={stationId} stationName={selectedStation?.name} dateFrom={dateFrom || undefined} dateTo={dateTo || undefined} />}
+          {activeTab === 'data-table'     && <SectionDataTable     stationId={stationId} stationName={selectedStation?.name} dateFrom={dateFrom || undefined} dateTo={dateTo || undefined} />}
           {activeTab === 'isolines'       && <SectionIsolines      stationId={stationId} dateFrom={dateFrom || undefined} dateTo={dateTo || undefined} />}
           {activeTab === 'daily-profile'  && <SectionDailyProfile  stationId={stationId} dateFrom={dateFrom || undefined} dateTo={dateTo || undefined} />}
           {activeTab === 'annual-profile' && <SectionAnnualProfile stationId={stationId} dateFrom={dateFrom || undefined} dateTo={dateTo || undefined} />}
+          {activeTab === 'daily-peaks'    && <SectionDailyPeaks    stationId={stationId} dateFrom={dateFrom || undefined} dateTo={dateTo || undefined} />}
           {activeTab === 'combined'       && <SectionCombined      stationId={stationId} stationAlt={stationAlt} dateFrom={dateFrom || undefined} dateTo={dateTo || undefined} />}
         </>
       )}

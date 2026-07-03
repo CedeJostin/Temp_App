@@ -6,7 +6,8 @@ Endpoints de análisis y visualización (gráficas) sobre las mediciones.
   GET  /stats                 Estadísticos + FDP + Gaussianas (T) o Beta (HR)
   POST /stats/recalculate     Recalcula el ajuste desde las mediciones guardadas
   GET  /stats/summary-table   Tabla exportable de ajustes por estación (b.1)
-  GET  /heatmap               Matriz mes × hora / mes × semana
+  GET  /heatmap               Matriz mes × hora / mes × semana (stat=avg|mode)
+  GET  /daily-peaks           Hora y valor del máximo diario (+ por gaussiana)
   GET  /daily-profile         Perfil diario promedio por mes (c.2)
   GET  /annual-profile        Perfil anual promedio (c.3)
   GET  /combined              Densidad T×HR, humedad absoluta, humectación
@@ -277,6 +278,7 @@ def get_heatmap(
     station_id:    str           = Query(...),
     variable_code: str           = Query(...),
     group_by:      str           = Query("hour", pattern="^(hour|week)$"),
+    stat:          str           = Query("avg", pattern="^(avg|mode)$"),
     date_from:     Optional[str] = Query(None),
     date_to:       Optional[str] = Query(None),
     db: Session = Depends(get_db),
@@ -292,6 +294,63 @@ def get_heatmap(
 
     if not variable:
         raise HTTPException(status_code=404, detail=f"Variable '{vc}' no encontrada")
+
+    if stat == "mode":
+        # Moda por celda (RF-10): la media aplana la HR; se binea el valor a la
+        # resolución de la FDP (1 % HR, 0.1 °C TEMP) y se toma el más frecuente.
+        # Se calcula siempre desde las mediciones crudas (el precalculado solo
+        # guarda promedios).
+        import pandas as pd
+
+        q = (
+            db.query(Measurement)
+            .join(Measurement.variable)
+            .filter(Measurement.station_id == station_id)
+            .filter(func.upper(Variable.code) == vc)
+        )
+        q = _apply_date_filters(q, date_from, date_to)
+        rows = q.all()
+
+        if not rows:
+            raise HTTPException(status_code=404, detail="Sin datos para los filtros indicados")
+
+        df = pd.DataFrame([
+            {"measured_at": r.measured_at, "value": float(r.value)}
+            for r in rows
+        ])
+        df["measured_at"] = pd.to_datetime(df["measured_at"])
+        df["mes"] = df["measured_at"].dt.month
+
+        if group_by == "hour":
+            df["eje"] = df["measured_at"].dt.hour
+            eje_label, eje_range = "hora", list(range(0, 24))
+        else:
+            df["eje"] = ((df["measured_at"].dt.day - 1) // 7 + 1)
+            eje_label, eje_range = "semana_mes", list(range(1, 6))
+
+        step = 1.0 if vc == "HR" else 0.1
+        df["bin"] = (df["value"] / step).round() * step
+
+        agg = (
+            df.groupby(["mes", "eje"])["bin"]
+            .agg(lambda s: float(s.mode().iloc[0]))
+            .round(2)
+            .reset_index()
+            .rename(columns={"bin": "avg", "eje": eje_label})
+        )
+        matrix = agg.to_dict(orient="records")
+        vals   = [r["avg"] for r in matrix if r["avg"] is not None]
+
+        return {
+            "matrix":    matrix,
+            "eje_label": eje_label,
+            "eje_range": eje_range,
+            "group_by":  group_by,
+            "stat":      "mode",
+            "min":       round(min(vals), 2) if vals else None,
+            "max":       round(max(vals), 2) if vals else None,
+            "source":    "calculado",
+        }
 
     if group_by == "hour":
         rows = (
@@ -358,6 +417,124 @@ def get_heatmap(
         "min":       round(float(all_vals.min()), 2),
         "max":       round(float(all_vals.max()), 2),
         "source":    "calculado",
+    }
+
+
+@router.get("/daily-peaks")
+def get_daily_peaks(
+    station_id:    str           = Query(...),
+    variable_code: str           = Query(...),
+    date_from:     Optional[str] = Query(None),
+    date_to:       Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """
+    Máximo diario de la variable (RF-03/RF-04): para cada día devuelve la hora
+    y el valor del máximo — un punto por día, sin promediar. Para TEMP, además
+    asigna cada medición a su componente gaussiana más probable (según el
+    ajuste precalculado) y devuelve el máximo diario dentro de cada componente.
+    """
+    import json
+
+    import numpy as np
+    import pandas as pd
+
+    from app.models.distribution_analysis import DistributionAnalysis
+
+    vc    = variable_code.strip().upper()
+    is_hr = vc == "HR"
+
+    variable = db.query(Variable).filter(
+        func.upper(Variable.code) == vc
+    ).first()
+    if not variable:
+        raise HTTPException(status_code=404, detail=f"Variable '{vc}' no encontrada")
+
+    q = (
+        db.query(Measurement)
+        .join(Measurement.variable)
+        .filter(Measurement.station_id == station_id)
+        .filter(func.upper(Variable.code) == vc)
+    )
+    q = _apply_date_filters(q, date_from, date_to)
+    rows = q.all()
+
+    if not rows:
+        raise HTTPException(status_code=404, detail="Sin datos para los filtros indicados")
+
+    df = pd.DataFrame({
+        "measured_at": [r.measured_at for r in rows],
+        "value":       [float(r.value) for r in rows],
+    })
+    df["measured_at"] = pd.to_datetime(df["measured_at"])
+    df["date"] = df["measured_at"].dt.date
+    df["doy"]  = df["measured_at"].dt.dayofyear
+    df["hour"] = df["measured_at"].dt.hour
+    df["year"] = df["measured_at"].dt.year
+
+    def _peaks(sub):
+        idx = sub.groupby("date")["value"].idxmax()
+        top = sub.loc[idx]
+        return [
+            {
+                "date":  str(r.date),
+                "year":  int(r.year),
+                "doy":   int(r.doy),
+                "hour":  int(r.hour),
+                "value": round(float(r.value), 2),
+            }
+            for r in top.itertuples()
+        ]
+
+    daily_max = _peaks(df)
+
+    # Descomposición por componente gaussiana (solo TEMP, ajuste precalculado):
+    # cada medición se asigna a la componente de mayor densidad ponderada
+    # w·N(x; μ, σ) y se toma el máximo diario dentro de cada grupo.
+    components_out = []
+    if not is_hr:
+        dist_record = (
+            db.query(DistributionAnalysis)
+            .filter(
+                DistributionAnalysis.station_id        == station_id,
+                DistributionAnalysis.variable_id       == str(variable.id),
+                DistributionAnalysis.distribution_type == "gaussian",
+            )
+            .order_by(DistributionAnalysis.calculated_at.desc())
+            .first()
+        )
+        comps = (
+            json.loads(dist_record.components_json)
+            if dist_record and dist_record.components_json else []
+        )
+        if len(comps) >= 2:
+            mus  = np.array([float(c.get("mu")    or 0.0) for c in comps])
+            sigs = np.array([max(float(c.get("sigma") or 0.0), 1e-9) for c in comps])
+            ws   = np.array([float(c.get("w")     or 0.0) for c in comps])
+
+            vals = df["value"].to_numpy()
+            dens = (
+                ws[:, None] / sigs[:, None]
+                * np.exp(-0.5 * ((vals[None, :] - mus[:, None]) / sigs[:, None]) ** 2)
+            )
+            df["comp"] = dens.argmax(axis=0)
+
+            for k, c in enumerate(comps):
+                sub = df[df["comp"] == k]
+                if sub.empty:
+                    continue
+                components_out.append({
+                    "comp":   k + 1,
+                    "mu":     c.get("mu"),
+                    "sigma":  c.get("sigma"),
+                    "w":      c.get("w"),
+                    "points": _peaks(sub),
+                })
+
+    return {
+        "daily_max":  daily_max,
+        "components": components_out,
+        "n_days":     len(daily_max),
     }
 
 
