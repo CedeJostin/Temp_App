@@ -28,7 +28,7 @@ from sqlalchemy.orm import Session
 from app.db.database import get_db
 from app.models.uploaded_file import UploadedFile
 from app.models.variable import Variable
-from app.services.file_parser import parse_file
+from app.services.file_parser import parse_file, parse_wind_imn
 from app.services.measurement_service import insert_measurements
 
 router = APIRouter()
@@ -45,6 +45,84 @@ VTYPE_TO_CODE = {
     "Radiacion":   "RAD",
     "Viento":      "VIENTO",
 }
+
+
+def _get_or_create_variable(db: Session, code: str, name: str, unit: str) -> str:
+    var = db.query(Variable).filter(Variable.code == code).first()
+    if var:
+        return str(var.id)
+    var = Variable(code=code, name=name, unit=unit)
+    db.add(var)
+    db.commit()
+    db.refresh(var)
+    return str(var.id)
+
+
+def _process_wind_upload(db, filename, station_id, wind_df, logs):
+    """Flujo del viento IMN: inserta las DOS series (VIENTO velocidad +
+    VIENTO_DIR dirección) desde un solo archivo y precalcula el ajuste Weibull
+    sobre la velocidad. La dirección solo alimenta la rosa/análisis direccional
+    (se lee cruda), así que solo se le hace summary."""
+    vel_id = _get_or_create_variable(db, "VIENTO",     "Velocidad del viento", "m/s")
+    dir_id = _get_or_create_variable(db, "VIENTO_DIR", "Dirección del viento", "°")
+
+    uploaded = UploadedFile(
+        filename=filename, source="streamlit_upload",
+        rows_imported=len(wind_df), status="processing",
+    )
+    db.add(uploaded)
+    db.commit()
+    db.refresh(uploaded)
+    file_id = str(uploaded.id)
+
+    vel_df = (wind_df[["measured_at", "velocidad"]]
+              .rename(columns={"velocidad": "value"}).dropna(subset=["value"]))
+    dir_df = (wind_df[["measured_at", "direccion"]]
+              .rename(columns={"direccion": "value"}).dropna(subset=["value"]))
+
+    rows_vel = insert_measurements(db=db, df=vel_df, station_id=station_id,
+                                   variable_id=vel_id, file_id=file_id)
+    rows_dir = insert_measurements(db=db, df=dir_df, station_id=station_id,
+                                   variable_id=dir_id, file_id=file_id)
+    logs.append(f"✅ Insertados VIENTO: {rows_vel:,} · VIENTO_DIR: {rows_dir:,}")
+
+    uploaded.status = "processed"
+    uploaded.rows_imported = rows_vel + rows_dir
+    db.commit()
+
+    # Weibull sobre la velocidad; la dirección solo summary (es circular)
+    try:
+        from app.services.analytics_service import run_analytics, upsert_summary_stats
+        res = run_analytics(db=db, station_id=station_id,
+                            variable_id=vel_id, variable_code="VIENTO")
+        logs += res.get("logs", [])
+        upsert_summary_stats(db=db, station_id=station_id, variable_id=vel_id)
+        upsert_summary_stats(db=db, station_id=station_id, variable_id=dir_id)
+        logs.append("✅ Summary stats actualizados (viento)")
+    except Exception as e:
+        db.rollback()
+        logs.append(f"⚠️ Analytics de viento falló: {e}")
+
+    try:
+        from app.services.stats_service import recalculate_derived_stats
+        derived = recalculate_derived_stats(db=db, station_id=station_id,
+                                            variable_id=vel_id, variable_code="VIENTO")
+        logs += derived.get("logs", [])
+    except Exception as e:
+        db.rollback()
+        logs.append(f"⚠️ Estadísticas derivadas del viento fallaron: {e}")
+
+    return {
+        "message":         "Archivo de viento procesado correctamente",
+        "file_id":         file_id,
+        "filename":        filename,
+        "variable_type":   "Viento",
+        "variable_id":     vel_id,
+        "variable_dir_id": dir_id,
+        "rows_parsed":     len(wind_df),
+        "rows_inserted":   rows_vel + rows_dir,
+        "logs":            logs,
+    }
 
 
 @router.post("/")
@@ -69,6 +147,22 @@ async def upload_file(
     # ─────────────────────────────────────────────────────────
     contents = await file.read()
     filename = file.filename or "archivo_sin_nombre"
+
+    # ─────────────────────────────────────────────────────────
+    # 1b. VIENTO: formato IMN con dos series (velocidad + dirección)
+    # Se intenta primero; si el archivo no es de viento devuelve vacío
+    # y sigue el flujo normal de una sola variable.
+    # ─────────────────────────────────────────────────────────
+    wind_df, wind_logs = parse_wind_imn(contents, filename)
+    if not wind_df.empty:
+        try:
+            return _process_wind_upload(db, filename, station_id, wind_df, wind_logs)
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail={"message": "Error procesando archivo de viento",
+                        "error": str(e), "logs": wind_logs},
+            )
 
 
     # ─────────────────────────────────────────────────────────

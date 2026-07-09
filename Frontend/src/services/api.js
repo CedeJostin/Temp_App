@@ -61,6 +61,12 @@ export const measurementsApi = {
   dailyPeaks: (p = {}) =>                                                // ← nuevo (RF-03/04)
     req(`/measurements/daily-peaks?${new URLSearchParams(clean(p))}`),
 
+  windRose: (p = {}) =>                                                   // ← viento (rosa)
+    req(`/measurements/wind-rose?${new URLSearchParams(clean(p))}`),
+
+  windDirectional: (p = {}) =>                                           // ← viento (dir×año/hora)
+    req(`/measurements/wind-directional?${new URLSearchParams(clean(p))}`),
+
   dailyProfile: (p = {}) =>                                               // ← nuevo
     req(`/measurements/daily-profile?${new URLSearchParams(clean(p))}`),
 

@@ -16,6 +16,26 @@ const parsearCSV = (texto) => {
   const lineas = texto.trim().split("\n").filter(Boolean)
   const sep = lineas[0].includes(";") ? ";" : ","
 
+  const _norm = (s) => s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "")
+
+  // ── Formato Viento (IMN): bloque de metadatos arriba + encabezado
+  //    Fecha;Hora;…;Velocidad;Dirección en una fila más abajo ──────────
+  const hWind = lineas.findIndex(l => {
+    const cn = l.split(sep).map(c => _norm(c.trim()))
+    return cn.includes("fecha") && cn.some(c => c.startsWith("velocidad"))
+  })
+  if (hWind !== -1) {
+    const columnas = lineas[hWind].split(sep)
+      .map(c => c.trim()).filter(c => c !== "").slice(0, 6)
+    const filas = lineas.slice(hWind + 1, hWind + 4)
+      .map(l => l.split(sep).map(c => c.trim()).slice(0, 6))
+    const totalFilas = lineas.length - (hWind + 1)
+    const totalFaltantes = lineas.slice(hWind + 1).reduce((acc, l) =>
+      acc + l.split(sep).filter(c => c.trim() === "-" || c.trim() === "-9").length, 0
+    )
+    return { columnas, filas, totalFilas, totalFaltantes, variableDetectada: "Viento", formato: "WIND" }
+  }
+
   // ── Formato C: metadata en filas 0-3 (Estacion:;NOMBRE…) ──────────
   const primeraCelda = lineas[0].split(sep)[0].trim().toLowerCase()
     .normalize("NFD").replace(/[̀-ͯ]/g, "")

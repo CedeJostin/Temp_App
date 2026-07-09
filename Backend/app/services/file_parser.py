@@ -516,3 +516,131 @@ def _parse_excel(
                 .reset_index(drop=True))
 
     return combined, vtype_detected, logs
+
+
+# ── Parser especializado del formato de VIENTO del IMN ────────────────
+# El archivo de viento trae DOS series por registro (velocidad m/s y dirección
+# en grados), un bloque de metadatos arriba y dos layouts distintos según el
+# año. Devuelve un DataFrame [measured_at, velocidad, direccion]; si el archivo
+# no es de viento (no hay columna de velocidad) devuelve vacío y el flujo normal
+# de parse_file lo maneja.
+
+def _wind_hour(x) -> int | None:
+    """Convierte la hora del IMN a entero 0–24. Acepta '1:00', '01:00' y '100'
+    (HHMM), '2400', etc."""
+    s = str(x).strip()
+    if s in ("", "nan", "none", "None", "NaN"):
+        return None
+    try:
+        if ":" in s:
+            return int(s.split(":")[0])
+        f = float(s.replace(",", "."))
+        return int(f // 100) if abs(f) >= 100 else int(round(f))
+    except (ValueError, TypeError):
+        return None
+
+
+def _extract_wind_block(raw: pd.DataFrame) -> pd.DataFrame | None:
+    """De un DataFrame crudo (sin encabezado) localiza la fila de encabezado
+    del bloque IMN y devuelve measured_at / velocidad / direccion."""
+    hdr = None
+    for r in range(min(12, len(raw))):
+        if any(_norm(str(c)) == "fecha" for c in raw.iloc[r].tolist()):
+            hdr = r
+            break
+    if hdr is None:
+        return None
+
+    labels = [_norm(str(c)) for c in raw.iloc[hdr].tolist()]
+
+    def find(pred):
+        return next((j for j, l in enumerate(labels) if pred(l)), None)
+
+    j_fecha = find(lambda l: l.startswith("fecha"))
+    j_hora  = find(lambda l: l.startswith("hora"))
+    j_vel   = find(lambda l: l.startswith("velocidad"))
+    # Dirección en GRADOS: preferir la etiqueta con "grado"; si no, la columna
+    # "direccion" que no sea la textual "dirección predominante".
+    j_dir   = find(lambda l: "direccion" in l and "grado" in l)
+    if j_dir is None:
+        j_dir = find(lambda l: l.startswith("direccion") and "predomin" not in l)
+
+    if j_fecha is None or j_hora is None or j_vel is None:
+        return None
+
+    data  = raw.iloc[hdr + 1:].reset_index(drop=True)
+    hora  = data.iloc[:, j_hora].apply(_wind_hour)
+    base  = pd.to_datetime(data.iloc[:, j_fecha], dayfirst=True, errors="coerce")
+    hour_int  = hora.fillna(-1).astype(int)
+    extra_day = (hour_int == 24).astype(int)
+    hour_mod  = hour_int.clip(lower=0) % 24
+    measured  = (base
+                 + pd.to_timedelta(hour_mod, "h")
+                 + pd.to_timedelta(extra_day, "d"))
+
+    vel = _to_float(data.iloc[:, j_vel])
+    dr  = (_to_float(data.iloc[:, j_dir])
+           if j_dir is not None else pd.Series(np.nan, index=data.index))
+
+    out = pd.DataFrame({"measured_at": measured, "velocidad": vel, "direccion": dr})
+    # Centinela del IMN (-9 = sin dato) y cualquier negativo → nulo
+    out.loc[out["velocidad"] < 0, "velocidad"] = np.nan
+    out.loc[out["direccion"] < 0, "direccion"] = np.nan
+    out = out[out["measured_at"].notna() & (hora.notna().values)]
+    return out.reset_index(drop=True)
+
+
+def parse_wind_imn(
+    file_bytes: bytes,
+    filename:   str,
+) -> tuple[pd.DataFrame, list[str]]:
+    """Parsea el formato de viento del IMN (CSV o Excel multi-hoja). Devuelve
+    (df[measured_at, velocidad, direccion], logs). Vacío si NO es de viento."""
+    logs: list[str] = []
+    ext = filename.lower()
+    frames: list[pd.DataFrame] = []
+
+    try:
+        if ext.endswith((".xlsx", ".xls")):
+            xl = pd.ExcelFile(io.BytesIO(file_bytes))
+            for sname in xl.sheet_names:
+                raw = xl.parse(sname, header=None)
+                block = _extract_wind_block(raw)
+                if block is not None and not block.empty:
+                    frames.append(block)
+                    logs.append(f"✅ Hoja '{sname}': {len(block):,} registros de viento")
+        elif ext.endswith(".csv"):
+            for enc in ("utf-8", "latin1", "cp1252"):
+                try:
+                    txt = file_bytes.decode(enc, errors="strict")
+                except Exception:
+                    continue
+                sep = ";" if txt.count(";") >= txt.count(",") else ","
+                raw = pd.read_csv(io.BytesIO(file_bytes), sep=sep, header=None,
+                                  dtype=str, encoding=enc, engine="python")
+                block = _extract_wind_block(raw)
+                if block is not None and not block.empty:
+                    frames.append(block)
+                    break
+    except Exception as e:
+        logs.append(f"⚠️ parse_wind_imn: {e}")
+        return pd.DataFrame(), logs
+
+    if not frames:
+        return pd.DataFrame(), logs
+
+    combined = (pd.concat(frames, ignore_index=True)
+                .dropna(subset=["measured_at"])
+                .drop_duplicates(subset=["measured_at"])
+                .sort_values("measured_at")
+                .reset_index(drop=True))
+
+    if combined["velocidad"].notna().sum() == 0 or combined["direccion"].notna().sum() == 0:
+        return pd.DataFrame(), logs
+
+    logs.append(
+        f"✅ {filename} → Viento IMN: {len(combined):,} registros "
+        f"(vel: {combined['velocidad'].notna().sum():,}, "
+        f"dir: {combined['direccion'].notna().sum():,})"
+    )
+    return combined, logs

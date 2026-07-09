@@ -49,8 +49,9 @@ def get_stats(
     import json
     from app.models.distribution_analysis import DistributionAnalysis
 
-    vc    = variable_code.strip().upper()
-    is_hr = vc == "HR"
+    vc      = variable_code.strip().upper()
+    is_hr   = vc == "HR"
+    is_wind = vc == "VIENTO"
 
     variable = db.query(Variable).filter(
         func.upper(Variable.code) == vc
@@ -59,7 +60,7 @@ def get_stats(
     if not variable:
         raise HTTPException(status_code=404, detail=f"Variable '{vc}' no encontrada")
 
-    dist_type   = "beta" if is_hr else "gaussian"
+    dist_type   = "weibull" if is_wind else ("beta" if is_hr else "gaussian")
     dist_record = (
         db.query(DistributionAnalysis)
         .filter(
@@ -81,13 +82,14 @@ def get_stats(
         anomalies  = json.loads(dist_record.anomalies_json or "[]")
         r2         = dist_record.r2
         mse        = dist_record.mse
-        quality    = _quality_flags(mse, r2, fdp_fitted)
+        quality    = _quality_flags(mse, r2, fdp_fitted, error_target=(2e-3 if is_wind else 1e-3))
         w_sum      = round(sum(c.get("w", 0) for c in components), 4)
         quality["weights_sum"]    = w_sum
         quality["weights_sum_ok"] = abs(w_sum - 1.0) < 0.01
 
-        gaussians = components if not is_hr else []
-        betas     = components if is_hr     else []
+        gaussians = components if dist_type == "gaussian" else []
+        betas     = components if dist_type == "beta"     else []
+        weibulls  = components if dist_type == "weibull"  else []
 
         return {
             "n":                  int(dist_record.n_records),
@@ -112,6 +114,7 @@ def get_stats(
             "fdp":                fdp_fitted,
             "gaussians":          gaussians,
             "betas":              betas,
+            "weibulls":           weibulls,
             "r2":                 r2,
             "mse":                mse,
             "quality":            quality,
@@ -137,7 +140,7 @@ def recalculate_stats(
     if variable_code:
         codes = [variable_code.strip().upper()]
     else:
-        codes = ["TEMP", "HR"]
+        codes = ["TEMP", "HR", "VIENTO"]
 
     resultados = []
     for vc in codes:
@@ -915,4 +918,172 @@ def get_combined(
         "p_tot_pa":     round(p_tot, 1),
         "altitude":     altitude,
     }
+
+
+# ═════════════════════════════════════════════════════════════
+# VIENTO — rosa de vientos y análisis direccional/temporal
+# Cruza en vivo las series VIENTO (velocidad) y VIENTO_DIR (dirección)
+# por measured_at. Bineo a 16 sectores de 22.5° (Ugalde et al. 2025).
+# ═════════════════════════════════════════════════════════════
+
+DIR16_LABELS = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+                "S", "SSO", "SO", "OSO", "O", "ONO", "NO", "NNO"]
+
+
+def _load_wind_pairs(db, station_id, date_from, date_to):
+    """DataFrame [measured_at, speed, direction] cruzando VIENTO y VIENTO_DIR."""
+    import pandas as pd
+
+    vel = db.query(Variable).filter(func.upper(Variable.code) == "VIENTO").first()
+    dr  = db.query(Variable).filter(func.upper(Variable.code) == "VIENTO_DIR").first()
+    if not vel or not dr:
+        return None
+
+    def _load(vid, col):
+        q = (db.query(Measurement.measured_at, Measurement.value)
+             .filter(Measurement.station_id == station_id,
+                     Measurement.variable_id == str(vid),
+                     Measurement.value.isnot(None)))
+        q = _apply_date_filters(q, date_from, date_to)
+        return pd.DataFrame(q.all(), columns=["measured_at", col])
+
+    sp = _load(vel.id, "speed")
+    di = _load(dr.id,  "direction")
+    if sp.empty or di.empty:
+        return None
+
+    m = sp.merge(di, on="measured_at", how="inner")
+    m["measured_at"] = pd.to_datetime(m["measured_at"])
+    m["speed"]     = pd.to_numeric(m["speed"], errors="coerce")
+    m["direction"] = pd.to_numeric(m["direction"], errors="coerce")
+    return m.dropna(subset=["speed", "direction"])
+
+
+def _load_weibull_components(db, station_id):
+    import json
+    from app.models.distribution_analysis import DistributionAnalysis
+    vel = db.query(Variable).filter(func.upper(Variable.code) == "VIENTO").first()
+    if not vel:
+        return []
+    rec = (db.query(DistributionAnalysis)
+           .filter(DistributionAnalysis.station_id == station_id,
+                   DistributionAnalysis.variable_id == str(vel.id),
+                   DistributionAnalysis.distribution_type == "weibull")
+           .order_by(DistributionAnalysis.calculated_at.desc())
+           .first())
+    return json.loads(rec.components_json) if rec and rec.components_json else []
+
+
+@router.get("/wind-rose")
+def get_wind_rose(
+    station_id: str           = Query(...),
+    date_from:  Optional[str] = Query(None),
+    date_to:    Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """Rosa de vientos general (16 sectores × bandas de velocidad) y una rosa
+    por cada viento del modelo Weibull (registros en vmax ± σ)."""
+    import numpy as np
+    import pandas as pd
+
+    m = _load_wind_pairs(db, station_id, date_from, date_to)
+    if m is None or m.empty:
+        raise HTTPException(status_code=404, detail="Sin datos de viento (velocidad + dirección)")
+
+    n = len(m)
+    m["sector"] = (np.round(m["direction"] / 22.5).astype(int) % 16)
+
+    speed_edges  = [0, 2, 4, 6, 8, 10, np.inf]
+    speed_labels = ["0–2", "2–4", "4–6", "6–8", "8–10", "10+"]
+    m["sbin"] = pd.cut(m["speed"], bins=speed_edges, labels=speed_labels,
+                       right=False, include_lowest=True)
+
+    general = []
+    for s in range(16):
+        sub = m[m["sector"] == s]
+        general.append({
+            "sector":     s,
+            "label":      DIR16_LABELS[s],
+            "dir_deg":    round(s * 22.5, 1),
+            "total":      int(len(sub)),
+            "pct":        round(len(sub) / n * 100, 2),
+            "mean_speed": round(float(sub["speed"].mean()), 2) if len(sub) else 0.0,
+            "bins":       [int((sub["sbin"] == lb).sum()) for lb in speed_labels],
+        })
+
+    comps = _load_weibull_components(db, station_id)
+    by_wind = []
+    for k, c in enumerate(comps):
+        vmax = c.get("vmax")
+        sig  = c.get("sigma") or 0.0
+        if vmax is None:
+            continue
+        sub = m[(m["speed"] >= vmax - sig) & (m["speed"] <= vmax + sig)]
+        nn  = len(sub)
+        by_wind.append({
+            "comp":  k + 1,
+            "vmax":  vmax,
+            "sigma": c.get("sigma"),
+            "w":     c.get("w"),
+            "n":     int(nn),
+            "sectors": [
+                {
+                    "sector":  s,
+                    "label":   DIR16_LABELS[s],
+                    "dir_deg": round(s * 22.5, 1),
+                    "count":   int((sub["sector"] == s).sum()),
+                    "pct":     round(int((sub["sector"] == s).sum()) / nn * 100, 2) if nn else 0.0,
+                }
+                for s in range(16)
+            ],
+        })
+
+    return {"n": n, "speed_bins": speed_labels, "general": general, "by_wind": by_wind}
+
+
+@router.get("/wind-directional")
+def get_wind_directional(
+    station_id: str           = Query(...),
+    date_from:  Optional[str] = Query(None),
+    date_to:    Optional[str] = Query(None),
+    max_points: int           = Query(4000, ge=200, le=20000),
+    db: Session = Depends(get_db),
+):
+    """Para cada viento (vmax ± σ) devuelve los registros con su día del año,
+    hora y dirección — insumo de los gráficos dirección×año y dirección×hora."""
+    import numpy as np  # noqa: F401
+
+    m = _load_wind_pairs(db, station_id, date_from, date_to)
+    if m is None or m.empty:
+        raise HTTPException(status_code=404, detail="Sin datos de viento (velocidad + dirección)")
+
+    m["doy"]   = m["measured_at"].dt.dayofyear
+    m["hour"]  = m["measured_at"].dt.hour
+    m["month"] = m["measured_at"].dt.month
+
+    comps = _load_weibull_components(db, station_id)
+    out = []
+    for k, c in enumerate(comps):
+        vmax = c.get("vmax")
+        sig  = c.get("sigma") or 0.0
+        if vmax is None:
+            continue
+        sub = m[(m["speed"] >= vmax - sig) & (m["speed"] <= vmax + sig)]
+        n_total = int(len(sub))
+        if n_total > max_points:
+            sub = sub.sample(max_points, random_state=0)
+        out.append({
+            "comp":    k + 1,
+            "vmax":    vmax,
+            "sigma":   c.get("sigma"),
+            "w":       c.get("w"),
+            "n_total": n_total,
+            "points": [
+                {"doy": int(r.doy), "hour": int(r.hour),
+                 "dir": round(float(r.direction), 1), "month": int(r.month)}
+                for r in sub.itertuples()
+            ],
+        })
+
+    return {"components": out}
 

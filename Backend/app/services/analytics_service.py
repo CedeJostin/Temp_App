@@ -28,6 +28,7 @@ from app.services.distribution_fitting import (
     _build_fdp,
     _fit_gaussian_components,
     _fit_beta_components,
+    _fit_weibull_components,
 )
 
 
@@ -232,11 +233,18 @@ def _calc_distribution(
 ) -> list[str]:
     logger.debug(f">>> _calc_distribution iniciado: variable_code={variable_code}")
 
-    values = df["value"].values
-    is_hr  = variable_code.strip().upper() == "HR"
-    paso   = 1.0 if is_hr else 0.1
+    vc = variable_code.strip().upper()
 
-    logger.debug(f">>> valores: {len(values)}, is_hr={is_hr}")
+    # La dirección del viento es circular: no se ajusta a una distribución.
+    if vc == "VIENTO_DIR":
+        return ["ℹ️ distribution_analysis: VIENTO_DIR es direccional, sin ajuste"]
+
+    values  = df["value"].values
+    is_hr   = vc == "HR"
+    is_wind = vc == "VIENTO"
+    paso    = 1.0 if is_hr else 0.1
+
+    logger.debug(f">>> valores: {len(values)}, is_hr={is_hr}, is_wind={is_wind}")
 
     n    = len(values)
     mean = float(np.mean(values))
@@ -265,15 +273,25 @@ def _calc_distribution(
     )
     completitud = round(n / horas_totales * 100, 2)
 
-    fdp = _build_fdp(values, paso)
+    # El viento excluye las calmas (v=0) del ajuste de la FDP (Ugalde et al.)
+    # y usa bins alineados a la rejilla de 0.1 m/s (evita el aliasing que
+    # aparece con datos cuantizados a un decimal y hunde el R²).
+    fit_values = values[values > 0] if is_wind else values
+    fdp = _build_fdp(fit_values, paso, align_grid=is_wind)
     logger.debug(f">>> fdp bins: {len(fdp)}")
-    
+
     if len(fdp) <= 4:
         return ["⚠️ distribution_analysis: muy pocos bins para ajustar"]
 
-    logger.debug(f">>> iniciando ajuste {'beta' if is_hr else 'gaussian'}...")
+    dist_label = "weibull" if is_wind else ("beta" if is_hr else "gaussian")
+    logger.debug(f">>> iniciando ajuste {dist_label}...")
     try:
-        if is_hr:
+        if is_wind:
+            # Deconvolución de curvas Weibull ponderadas (Ugalde et al. 2025):
+            # 3 vientos por defecto (comercial, valle-montaña, mixto débil).
+            components, r2, mse, fdp_fitted = _fit_weibull_components(fdp, n_components=3)
+            dist_type = "weibull"
+        elif is_hr:
             # free_support libera el "entorno" [A,B] de cada beta (paso 1 del
             # feedback); censor_sat añade la censura XBX del spike de saturación
             # en HR=100. Sobre la HR real: err_acum −30 %, R² 0.995, área 1.000.

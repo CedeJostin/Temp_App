@@ -24,6 +24,10 @@ const TABS = [
   { id: 'annual-profile', label: 'c.3) Perfil anual'          },
   { id: 'daily-peaks',    label: 'c.4) Picos máximos'         },
   { id: 'combined',       label: 'd) T × HR combinado'        },
+  { id: 'wind-rose',      label: 'e.1) Rosa de vientos'       },
+  { id: 'wind-rose-each', label: 'e.2) Rosa por viento'       },
+  { id: 'wind-year',      label: 'e.3) Viento × año'          },
+  { id: 'wind-hour',      label: 'e.4) Viento × hora'         },
 ]
 
 const fmt = (s) => {
@@ -59,6 +63,7 @@ const BETA_COLORS = [
   '#4ade80',
   '#c084fc',
 ]
+const WB_COLORS = ['#4ade80', '#c084fc', '#f87171', '#38bdf8', '#facc15']  // viento (Weibull)
 const FDP_SUMA_COLOR  = '#e2e8f0'
 const FDP_FREC_COLOR  = '#ef4444'
 
@@ -558,6 +563,20 @@ function prepareFDPBeta(fdp, betas) {
   })
 }
 
+// Weibull: el backend ya trae wb1/wb2/wb3 y model en cada punto de la FDP.
+function prepareFDPWeibull(fdp, weibulls) {
+  if (!fdp?.length) return []
+  return fdp.map(point => {
+    const enriched = { ...point }
+    enriched.sumaGauss = point.model != null ? parseFloat(point.model.toFixed(7)) : 0
+    ;(weibulls ?? []).forEach((_, i) => {
+      const key = `wb${i + 1}`
+      enriched[key] = point[key] != null ? parseFloat(point[key].toFixed(7)) : 0
+    })
+    return enriched
+  })
+}
+
 function _logGammaJS(z) {
   if (z <= 0) return Infinity
   if (z < 0.5) return Math.log(Math.PI / Math.sin(Math.PI * z)) - _logGammaJS(1 - z)
@@ -774,9 +793,24 @@ const BetaCards = ({ betas }) => (
   </div>
 )
 
+const WeibullCards = ({ weibulls }) => (
+  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 14 }}>
+    {(weibulls ?? []).map((c, i) => (
+      <div key={i} style={{ background: '#0f1217', borderRadius: 8, padding: '8px 12px', borderLeft: `3px solid ${WB_COLORS[i % WB_COLORS.length]}` }}>
+        <div style={{ fontSize: 11, color: WB_COLORS[i % WB_COLORS.length], marginBottom: 4, fontWeight: 700 }}>Viento {i + 1}</div>
+        <div style={{ fontSize: 12, color: '#e7eaf0' }}>v<sub>máx</sub> = <strong>{c.vmax?.toFixed(2)} m/s</strong></div>
+        <div style={{ fontSize: 12, color: '#e7eaf0' }}>σ = <strong>{c.sigma?.toFixed(2)}</strong></div>
+        <div style={{ fontSize: 12, color: '#e7eaf0' }}>λ = <strong>{c.lambda?.toFixed(2)}</strong> · k = <strong>{c.k?.toFixed(2)}</strong></div>
+        <div style={{ fontSize: 12, color: '#e7eaf0' }}>w = <strong>{((c.w ?? 0) * 100).toFixed(1)}%</strong></div>
+      </div>
+    ))}
+  </div>
+)
+
 function SectionFDP({ stationId, dateFrom, dateTo }) {
   const [tStats,  setTStats]  = useState(null)
   const [hStats,  setHStats]  = useState(null)
+  const [wStats,  setWStats]  = useState(null)
   const [loading, setLoading] = useState(false)
   const [error,   setError]   = useState(null)
   const [recalc,  setRecalc]  = useState(false)
@@ -786,12 +820,14 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
     if (!stationId) return
     setLoading(true); setError(null)
     try {
-      const [t, h] = await Promise.all([
+      const [t, h, w] = await Promise.all([
         measurementsApi.stats({ station_id: stationId, variable_code: 'TEMP', date_from: dateFrom, date_to: dateTo, n_components: 2 }),
         measurementsApi.stats({ station_id: stationId, variable_code: 'HR',   date_from: dateFrom, date_to: dateTo, n_components: 5 }),
+        measurementsApi.stats({ station_id: stationId, variable_code: 'VIENTO', date_from: dateFrom, date_to: dateTo }).catch(() => null),
       ])
       setTStats(t)
       setHStats(h)
+      setWStats(w)
     } catch (e) { setError(e.message) }
     finally { setLoading(false) }
   }, [stationId, dateFrom, dateTo])
@@ -821,6 +857,8 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
   const tPaso = tStats?.fdp_resolution ?? 0.1
   const tFdp = tStats ? prepareFDPGaussian(tStats.fdp, tStats.gaussians ?? [], tPaso) : []
   const hFdp = hStats ? prepareFDPBeta(hStats.fdp, hStats.betas ?? []) : []
+  const wWeibulls = wStats?.weibulls ?? []
+  const wFdp = wStats ? prepareFDPWeibull(wStats.fdp, wWeibulls) : []
 
   const CustomTooltip = ({ active, payload, label, unit }) => {
     if (!active || !payload?.length) return null
@@ -958,6 +996,58 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
             <StatBox label="EMC"     value={hStats.mse?.toExponential(2) ?? '—'} color={hStats.quality?.mse_ok ? '#22c55e' : '#ef4444'} />
             <StatBox label="Err máx" value={hStats.quality?.max_error_range?.toFixed(5) ?? '—'} color={hStats.quality?.error_range_ok ? '#22c55e' : '#ef4444'} />
             <StatBox label="Σw"      value={hStats.quality?.weights_sum?.toFixed(4) ?? '—'} color={hStats.quality?.weights_sum_ok ? '#22c55e' : '#ef4444'} />
+          </div>
+        </SectionCard>
+      )}
+
+      {!loading && wStats && wWeibulls.length > 0 && (
+        <SectionCard
+          title="FDP — Viento (descomposición de curvas Weibull)"
+          subtitle={`R² = ${wStats.r2?.toFixed(4) ?? '—'} · EMC = ${wStats.mse?.toExponential(2) ?? '—'} · N = ${wStats.n?.toLocaleString()} · Resolución: 0.1 m/s`}
+          badge={<QualityBadge quality={wStats.quality} />}
+        >
+          <WeibullCards weibulls={wWeibulls} />
+          <div style={{ marginBottom: 12, padding: '6px 12px', background: '#0f1217', borderRadius: 6, fontSize: 11, color: '#5b6577', fontFamily: 'monospace' }}>
+            f(v) = (k/λ)(v/λ)^(k−1)·e^(−(v/λ)^k) · modelo(v) = Σ w_i · WB(v|k_i,λ_i) · 0.1
+          </div>
+          <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 8, fontSize: 11, alignItems: 'center' }}>
+            <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+              <svg width="24" height="4"><line x1="0" y1="2" x2="24" y2="2" stroke={FDP_FREC_COLOR} strokeWidth="2"/></svg>
+              <span style={{ color: '#8b94a6' }}>Frec norm</span>
+            </span>
+            {wWeibulls.map((c, i) => (
+              <span key={i} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                <svg width="24" height="4"><line x1="0" y1="2" x2="24" y2="2" stroke={WB_COLORS[i % WB_COLORS.length]} strokeWidth="1.5"/></svg>
+                <span style={{ color: '#8b94a6' }}>Viento {i + 1} (v máx={c.vmax?.toFixed(1)} m/s)</span>
+              </span>
+            ))}
+            <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+              <svg width="24" height="5"><line x1="0" y1="2.5" x2="24" y2="2.5" stroke={FDP_SUMA_COLOR} strokeWidth="3"/></svg>
+              <span style={{ color: '#8b94a6' }}>WB suma</span>
+            </span>
+          </div>
+          <ResponsiveContainer width="100%" height={340}>
+            <LineChart data={wFdp} margin={{ top: 8, right: 16, left: -10, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#272d37" strokeOpacity={0.5} />
+              <XAxis dataKey="x" tick={{ fontSize: 10, fill: '#8b94a6' }} unit=" m/s" type="number" domain={['dataMin', 'dataMax']} tickFormatter={v => v?.toFixed(0)} />
+              <YAxis tick={{ fontSize: 10, fill: '#8b94a6' }} tickFormatter={v => v.toExponential(1)} />
+              <Tooltip content={props => <CustomTooltip {...props} unit=" m/s" />} />
+              <Line type="monotone" dataKey="freq" name="Frec norm" stroke={FDP_FREC_COLOR} strokeWidth={2} dot={false} isAnimationActive={false} legendType="none" />
+              {wWeibulls.map((c, i) => (
+                <Line key={`wb${i + 1}`} type="monotone" dataKey={`wb${i + 1}`} name={`Viento ${i + 1}`} stroke={WB_COLORS[i % WB_COLORS.length]} strokeWidth={1.5} dot={false} isAnimationActive={false} legendType="none" />
+              ))}
+              <Line type="monotone" dataKey="sumaGauss" name="WB suma" stroke={FDP_SUMA_COLOR} strokeWidth={3} dot={false} isAnimationActive={false} legendType="none" />
+              {wWeibulls.map((c, i) => (
+                <ReferenceLine key={`ref${i}`} x={c.vmax} stroke={`${WB_COLORS[i % WB_COLORS.length]}80`} strokeDasharray="4 2"
+                  label={{ value: `v${i + 1}=${c.vmax?.toFixed(1)}`, fontSize: 9, fill: WB_COLORS[i % WB_COLORS.length], position: 'insideTopRight' }} />
+              ))}
+            </LineChart>
+          </ResponsiveContainer>
+          <div style={{ display: 'flex', gap: 16, marginTop: 12, flexWrap: 'wrap' }}>
+            <StatBox label="R²"      value={wStats.r2?.toFixed(4) ?? '—'} color="#22c55e" />
+            <StatBox label="EMC"     value={wStats.mse?.toExponential(2) ?? '—'} color={wStats.quality?.mse_ok ? '#22c55e' : '#ef4444'} />
+            <StatBox label="Err máx" value={wStats.quality?.max_error_range?.toFixed(5) ?? '—'} color={wStats.quality?.error_range_ok ? '#22c55e' : '#ef4444'} />
+            <StatBox label="Σw"      value={wStats.quality?.weights_sum?.toFixed(4) ?? '—'} color={wStats.quality?.weights_sum_ok ? '#22c55e' : '#ef4444'} />
           </div>
         </SectionCard>
       )}
@@ -2368,6 +2458,291 @@ function SectionDailyPeaks({ stationId, dateFrom, dateTo }) {
 }
 
 // ══════════════════════════════════════════════════════════════
+// SECTION E — VIENTO (Weibull) · Ugalde, Jiménez & Rodríguez 2025
+//   Cada diagrama en su propia pestaña: rosa general · rosa por viento ·
+//   dirección×año · dirección×hora. (La FDP Weibull vive en la pestaña b) FDP.)
+// ══════════════════════════════════════════════════════════════
+const SPEED_BIN_COLORS = ['#1e3a8a', '#2563eb', '#22d3ee', '#84cc16', '#facc15', '#dc2626']
+// Rosa de 16 direcciones, notación en español (O = Oeste), como la pide Javier
+const DIR16_ES = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSO','SO','OSO','O','ONO','NO','NNO']
+
+// Ancho responsivo del contenedor para dimensionar los SVG
+function useSvgWidth(initial = 700) {
+  const ref = useRef(null)
+  const [w, setW] = useState(initial)
+  useEffect(() => {
+    if (!ref.current) return
+    const ro = new ResizeObserver(entries => {
+      const cw = entries[0]?.contentRect?.width
+      if (cw > 0) setW(Math.floor(cw))
+    })
+    ro.observe(ref.current)
+    return () => ro.disconnect()
+  }, [])
+  return [ref, w]
+}
+
+function WindRoseSVG({ sectors, valueKey = 'pct', stacked = false, fill = 'var(--accent)', size = 300 }) {
+  const ref = useRef(null)
+  useEffect(() => {
+    if (!ref.current || !sectors?.length) return
+    const svg = d3.select(ref.current); svg.selectAll('*').remove()
+    const cx = size / 2, cy = size / 2, R = size / 2 - 34
+    const maxVal = stacked
+      ? d3.max(sectors, s => (s.bins || []).reduce((a, b) => a + b, 0)) || 1
+      : d3.max(sectors, s => s[valueKey]) || 1
+    const rScale = d3.scaleLinear().domain([0, maxVal]).range([0, R])
+    const arc = d3.arc()
+    const g = svg.append('g').attr('transform', `translate(${cx},${cy})`)
+
+    rScale.ticks(4).filter(t => t > 0).forEach(t => {
+      g.append('circle').attr('r', rScale(t)).attr('fill', 'none')
+        .attr('stroke', '#272d37').attr('stroke-dasharray', '2,3')
+      g.append('text').attr('x', 2).attr('y', -rScale(t) - 2)
+        .attr('fill', '#5b6577').attr('font-size', 8)
+        .text(stacked ? t.toLocaleString() : `${t}%`)
+    })
+
+    // Radios de los 16 sectores (los "rayos" de la rosa)
+    DIR16_ES.forEach((_, i) => {
+      const a = i * 22.5 * Math.PI / 180
+      g.append('line')
+        .attr('x1', 0).attr('y1', 0)
+        .attr('x2', Math.sin(a) * R).attr('y2', -Math.cos(a) * R)
+        .attr('stroke', '#272d37').attr('stroke-width', 0.5).attr('opacity', 0.7)
+    })
+
+    sectors.forEach(s => {
+      const a0 = (s.dir_deg - 11.25) * Math.PI / 180
+      const a1 = (s.dir_deg + 11.25) * Math.PI / 180
+      if (stacked && s.bins) {
+        let acc = 0
+        s.bins.forEach((cnt, bi) => {
+          if (cnt <= 0) return
+          const path = arc({ innerRadius: rScale(acc), outerRadius: rScale(acc + cnt), startAngle: a0, endAngle: a1 })
+          acc += cnt
+          g.append('path').attr('d', path)
+            .attr('fill', SPEED_BIN_COLORS[bi % SPEED_BIN_COLORS.length])
+            .attr('opacity', 0.92).attr('stroke', '#0f1217').attr('stroke-width', 0.4)
+        })
+      } else {
+        const v = s[valueKey] || 0
+        g.append('path')
+          .attr('d', arc({ innerRadius: 0, outerRadius: rScale(v), startAngle: a0, endAngle: a1 }))
+          .attr('fill', fill).attr('opacity', 0.85)
+          .attr('stroke', '#0f1217').attr('stroke-width', 0.4)
+          .append('title').text(`${s.label}: ${v}${valueKey === 'pct' ? '%' : ''}`)
+      }
+    })
+
+    // 16 etiquetas con jerarquía: cardinales > intercardinales > secundarias
+    DIR16_ES.forEach((lbl, i) => {
+      const a = i * 22.5 * Math.PI / 180
+      const isCardinal = i % 4 === 0   // N, E, S, O
+      const isInter    = i % 4 === 2   // NE, SE, SO, NO
+      const lr = R + (isCardinal ? 18 : isInter ? 15 : 12)
+      g.append('text')
+        .attr('x', Math.sin(a) * lr).attr('y', -Math.cos(a) * lr)
+        .attr('fill', isCardinal ? '#e7eaf0' : isInter ? '#8b94a6' : '#5b6577')
+        .attr('font-size', isCardinal ? 12 : isInter ? 10 : 8)
+        .attr('font-weight', isCardinal ? 700 : isInter ? 600 : 500)
+        .attr('text-anchor', 'middle').attr('dominant-baseline', 'middle')
+        .text(lbl)
+    })
+  }, [sectors, valueKey, stacked, fill, size])
+  return <svg ref={ref} width={size} height={size} style={{ display: 'block', margin: '0 auto' }} />
+}
+
+function WindDirScatterSVG({ points, xKey, xMax, xLabel, color = 'var(--accent)', width, height }) {
+  const ref = useRef(null)
+  useEffect(() => {
+    if (!ref.current || !points?.length) return
+    const pad = { top: 14, right: 16, bottom: 44, left: 56 }
+    const pw = width - pad.left - pad.right, ph = height - pad.top - pad.bottom
+    if (pw <= 0 || ph <= 0) return
+    const x = d3.scaleLinear().domain([xKey === 'doy' ? 1 : -0.5, xMax]).range([0, pw])
+    const y = d3.scaleLinear().domain([0, 360]).range([ph, 0])
+    const svg = d3.select(ref.current); svg.selectAll('*').remove()
+    const clipId = `wdir-${xKey}-${Math.random().toString(36).slice(2, 8)}`
+    svg.append('defs').append('clipPath').attr('id', clipId)
+      .append('rect').attr('width', pw).attr('height', ph)
+    const g = svg.append('g').attr('transform', `translate(${pad.left},${pad.top})`)
+    g.append('rect').attr('width', pw).attr('height', ph).attr('fill', '#0a0a14')
+    const plot = g.append('g').attr('clip-path', `url(#${clipId})`)
+
+    ;[90, 180, 270].forEach(d => plot.append('line')
+      .attr('x1', 0).attr('x2', pw).attr('y1', y(d)).attr('y2', y(d))
+      .attr('stroke', '#272d37').attr('stroke-dasharray', '2,4').attr('opacity', 0.6))
+
+    // Separadores de mes cuando el eje X es el día del año
+    if (xKey === 'doy') {
+      DOY_MONTH_START.forEach((d0, i) => {
+        if (i === 0) return
+        plot.append('line').attr('x1', x(d0)).attr('x2', x(d0)).attr('y1', 0).attr('y2', ph)
+          .attr('stroke', '#272d37').attr('stroke-dasharray', '2,4').attr('opacity', 0.5)
+      })
+    }
+
+    // Puntos: un punto por registro en v máx ± σ (Javier los quiere con puntitos)
+    plot.append('g').selectAll('circle').data(points).join('circle')
+      .attr('cx', d => x(d[xKey])).attr('cy', d => y(d.dir))
+      .attr('r', 1.5).attr('fill', color).attr('opacity', 0.35)
+
+    const compassFmt = { 0: 'N', 90: 'E', 180: 'S', 270: 'O', 360: 'N' }
+    g.append('g')
+      .call(d3.axisLeft(y).tickValues([0, 90, 180, 270, 360]).tickFormat(d => compassFmt[d]))
+      .call(ax => ax.select('.domain').attr('stroke', '#3a424f'))
+      .call(ax => ax.selectAll('.tick line').attr('stroke', '#3a424f'))
+      .call(ax => ax.selectAll('.tick text').attr('fill', '#8b94a6').attr('font-size', 10))
+    if (xKey === 'doy') {
+      g.append('g').attr('transform', `translate(0,${ph})`)
+        .call(d3.axisBottom(x).tickValues(DOY_MONTH_START).tickFormat((d, i) => MONTHS[i]))
+        .call(ax => ax.select('.domain').attr('stroke', '#3a424f'))
+        .call(ax => ax.selectAll('.tick line').attr('stroke', '#3a424f'))
+        .call(ax => ax.selectAll('.tick text').attr('fill', '#8b94a6').attr('font-size', 9))
+    } else {
+      g.append('g').attr('transform', `translate(0,${ph})`)
+        .call(d3.axisBottom(x).tickValues([0, 4, 8, 12, 16, 20, 23]).tickFormat(d => `${String(d).padStart(2, '0')}h`))
+        .call(ax => ax.select('.domain').attr('stroke', '#3a424f'))
+        .call(ax => ax.selectAll('.tick line').attr('stroke', '#3a424f'))
+        .call(ax => ax.selectAll('.tick text').attr('fill', '#8b94a6').attr('font-size', 10))
+    }
+    g.append('text').attr('x', pw / 2).attr('y', ph + 36).attr('fill', '#c2c9d6')
+      .attr('font-size', 12).attr('text-anchor', 'middle').text(xLabel)
+    g.append('text').attr('transform', 'rotate(-90)').attr('x', -ph / 2).attr('y', -42)
+      .attr('fill', '#c2c9d6').attr('font-size', 12).attr('text-anchor', 'middle').text('Dirección del viento')
+    g.append('rect').attr('width', pw).attr('height', ph).attr('fill', 'none')
+      .attr('stroke', '#3a424f').attr('stroke-width', 0.8)
+  }, [points, xKey, xMax, xLabel, color, width, height])
+  return <svg ref={ref} width={width} height={height} style={{ display: 'block', width: '100%', borderRadius: 8 }} />
+}
+
+function SectionWindRose({ mode, stationId, dateFrom, dateTo }) {
+  const [rose,    setRose]    = useState(null)
+  const [loading, setLoading] = useState(false)
+  const [error,   setError]   = useState(null)
+  const [containerRef, svgW]  = useSvgWidth()
+
+  const load = useCallback(async () => {
+    if (!stationId) return
+    setLoading(true); setError(null)
+    try { setRose(await measurementsApi.windRose({ station_id: stationId, date_from: dateFrom, date_to: dateTo })) }
+    catch (e) { setError(e.message) }
+    finally { setLoading(false) }
+  }, [stationId, dateFrom, dateTo])
+  useEffect(() => { load() }, [load])
+
+  if (loading) return <Spinner />
+  if (error)   return <Err msg={error} />
+  if (!rose)   return null
+
+  return (
+    <div ref={containerRef} style={{ width: '100%' }}>
+      {mode === 'general' && rose.general && (
+        <SectionCard
+          title="Rosa de los vientos — general"
+          subtitle={`${rose.n?.toLocaleString()} registros · 16 direcciones · frecuencia por banda de velocidad`}
+        >
+          <WindRoseSVG sectors={rose.general} stacked size={Math.min(420, svgW)} />
+          <div style={{ display: 'flex', gap: 12, justifyContent: 'center', flexWrap: 'wrap', marginTop: 10, fontSize: 11 }}>
+            {(rose.speed_bins ?? []).map((lb, i) => (
+              <span key={lb} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                <span style={{ width: 12, height: 12, borderRadius: 2, background: SPEED_BIN_COLORS[i % SPEED_BIN_COLORS.length] }} />
+                <span style={{ color: '#8b94a6' }}>{lb} m/s</span>
+              </span>
+            ))}
+          </div>
+        </SectionCard>
+      )}
+
+      {mode === 'by_wind' && (
+        rose.by_wind?.length > 0 ? (
+          <SectionCard
+            title="Rosa de los vientos — por cada viento (v máx ± σ)"
+            subtitle="Distribución direccional de los registros cercanos al máximo de cada curva Weibull"
+          >
+            <div style={{ display: 'grid', gridTemplateColumns: `repeat(auto-fit, minmax(${Math.min(280, svgW)}px, 1fr))`, gap: 16 }}>
+              {rose.by_wind.map((wnd, i) => (
+                <div key={wnd.comp} style={{ minWidth: 0, textAlign: 'center' }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: WB_COLORS[i % WB_COLORS.length], marginBottom: 4 }}>
+                    Viento {wnd.comp} · {wnd.vmax?.toFixed(2)} m/s
+                  </div>
+                  <div style={{ fontSize: 11, color: '#5b6577', marginBottom: 4 }}>{wnd.n?.toLocaleString()} registros</div>
+                  <WindRoseSVG sectors={wnd.sectors} valueKey="pct" fill={WB_COLORS[i % WB_COLORS.length]} size={Math.min(280, svgW - 20)} />
+                </div>
+              ))}
+            </div>
+          </SectionCard>
+        ) : (
+          <div style={{ textAlign: 'center', color: '#8b94a6', padding: '2rem 0' }}>
+            Aún no hay ajuste Weibull para separar los vientos.
+          </div>
+        )
+      )}
+    </div>
+  )
+}
+
+function SectionWindDir({ xKey, stationId, dateFrom, dateTo }) {
+  const [dir,     setDir]     = useState(null)
+  const [loading, setLoading] = useState(false)
+  const [error,   setError]   = useState(null)
+  const [containerRef, svgW]  = useSvgWidth()
+  const isYear = xKey === 'doy'
+
+  const load = useCallback(async () => {
+    if (!stationId) return
+    setLoading(true); setError(null)
+    try { setDir(await measurementsApi.windDirectional({ station_id: stationId, date_from: dateFrom, date_to: dateTo })) }
+    catch (e) { setError(e.message) }
+    finally { setLoading(false) }
+  }, [stationId, dateFrom, dateTo])
+  useEffect(() => { load() }, [load])
+
+  if (loading) return <Spinner />
+  if (error)   return <Err msg={error} />
+  if (!dir?.components?.length) {
+    return (
+      <div style={{ textAlign: 'center', color: '#8b94a6', padding: '2rem 0' }}>
+        Sin datos direccionales de viento para esta estación.
+      </div>
+    )
+  }
+
+  return (
+    <div ref={containerRef} style={{ width: '100%' }}>
+      <SectionCard
+        title={isYear
+          ? 'Cada viento durante el año — dirección vs día del año'
+          : 'Cada viento durante el día — dirección vs hora'}
+        subtitle={isYear
+          ? 'Un punto por registro en v máx ± σ de cada viento (estacionalidad)'
+          : 'Un punto por registro en v máx ± σ de cada viento (ciclo diurno / brisas valle-montaña)'}
+      >
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 18 }}>
+          {dir.components.map((c, i) => (
+            <div key={c.comp} style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: WB_COLORS[i % WB_COLORS.length], marginBottom: 4 }}>
+                Viento {c.comp} · {c.vmax?.toFixed(2)} m/s ({c.n_total?.toLocaleString()} registros)
+              </div>
+              <WindDirScatterSVG
+                points={c.points}
+                xKey={xKey}
+                xMax={isYear ? 366 : 23.5}
+                xLabel={isYear ? 'Día del año (mes)' : 'Hora del día'}
+                color={WB_COLORS[i % WB_COLORS.length]}
+                width={svgW}
+                height={Math.round(svgW * 0.3)}
+              />
+            </div>
+          ))}
+        </div>
+      </SectionCard>
+    </div>
+  )
+}
+
+// ══════════════════════════════════════════════════════════════
 // PÁGINA PRINCIPAL
 // ══════════════════════════════════════════════════════════════
 export default function Analysis() {
@@ -2476,6 +2851,10 @@ export default function Analysis() {
           {activeTab === 'annual-profile' && <SectionAnnualProfile stationId={stationId} dateFrom={dateFrom || undefined} dateTo={dateTo || undefined} />}
           {activeTab === 'daily-peaks'    && <SectionDailyPeaks    stationId={stationId} dateFrom={dateFrom || undefined} dateTo={dateTo || undefined} />}
           {activeTab === 'combined'       && <SectionCombined      stationId={stationId} stationAlt={stationAlt} dateFrom={dateFrom || undefined} dateTo={dateTo || undefined} />}
+          {activeTab === 'wind-rose'      && <SectionWindRose mode="general"  stationId={stationId} dateFrom={dateFrom || undefined} dateTo={dateTo || undefined} />}
+          {activeTab === 'wind-rose-each' && <SectionWindRose mode="by_wind"  stationId={stationId} dateFrom={dateFrom || undefined} dateTo={dateTo || undefined} />}
+          {activeTab === 'wind-year'      && <SectionWindDir  xKey="doy"      stationId={stationId} dateFrom={dateFrom || undefined} dateTo={dateTo || undefined} />}
+          {activeTab === 'wind-hour'      && <SectionWindDir  xKey="hour"     stationId={stationId} dateFrom={dateFrom || undefined} dateTo={dateTo || undefined} />}
         </>
       )}
     </div>
