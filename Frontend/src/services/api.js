@@ -119,20 +119,4 @@ export const localAnalysisApi = {
     }
     return res.json()
   },
-
-  analyzeMulti: async (archivos, n_components = 2) => {
-    const form = new FormData()
-    form.append("n_components", n_components)
-    if (archivos.temperatura) form.append("temperatura", archivos.temperatura)
-    if (archivos.humedad)     form.append("humedad",     archivos.humedad)
-    if (archivos.viento)      form.append("viento",      archivos.viento)
-    const res = await fetch(`${BASE_URL}/local-analysis/multi`, {
-      method: "POST", body: form,
-    })
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}))
-      throw new Error(err.detail?.message || err.detail || `Error ${res.status}`)
-    }
-    return res.json()
-  },
 }

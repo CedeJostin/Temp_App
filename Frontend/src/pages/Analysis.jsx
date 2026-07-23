@@ -4,6 +4,7 @@ import {
   AreaChart, Area, BarChart, Bar,
   LineChart, Line, ComposedChart, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, Legend, ReferenceLine, Cell, Brush,
+  ScatterChart, Scatter, ZAxis,
 } from 'recharts'
 import { stationsApi, measurementsApi } from '../services/api'
 import { Loader2, AlertTriangle, RefreshCw, Download, CloudSun } from 'lucide-react'
@@ -859,6 +860,9 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
   const hFdp = hStats ? prepareFDPBeta(hStats.fdp, hStats.betas ?? []) : []
   const wWeibulls = wStats?.weibulls ?? []
   const wFdp = wStats ? prepareFDPWeibull(wStats.fdp, wWeibulls) : []
+  // Diagramas de control del ajuste Weibull (Fig. 5 y 6 del artículo)
+  const wRegData = wFdp.map(p => ({ real: p.freq, model: p.sumaGauss }))
+  const wMaxReg  = d3.max(wRegData, d => Math.max(d.real, d.model)) || 0.001
 
   const CustomTooltip = ({ active, payload, label, unit }) => {
     if (!active || !payload?.length) return null
@@ -1043,6 +1047,40 @@ function SectionFDP({ stationId, dateFrom, dateTo }) {
               ))}
             </LineChart>
           </ResponsiveContainer>
+
+          {/* Diagramas de control: regresión real vs modelo y error por punto */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginTop: 16 }}>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 12, color: '#8b94a6', marginBottom: 6, fontWeight: 600 }}>Regresión: real vs modelo (R² = {wStats.r2?.toFixed(4) ?? '—'})</div>
+              <ResponsiveContainer width="100%" height={220}>
+                <ScatterChart margin={{ top: 8, right: 12, left: -6, bottom: 4 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#272d37" strokeOpacity={0.5} />
+                  <XAxis type="number" dataKey="real" name="Real" domain={[0, wMaxReg]} tick={{ fontSize: 9, fill: '#8b94a6' }} tickFormatter={v => v.toExponential(0)} />
+                  <YAxis type="number" dataKey="model" name="Modelo" domain={[0, wMaxReg]} tick={{ fontSize: 9, fill: '#8b94a6' }} tickFormatter={v => v.toExponential(0)} />
+                  <ZAxis range={[16, 16]} />
+                  <ReferenceLine segment={[{ x: 0, y: 0 }, { x: wMaxReg, y: wMaxReg }]} stroke="#5b6577" strokeDasharray="4 3" />
+                  <Scatter data={wRegData} fill="var(--accent)" fillOpacity={0.5} isAnimationActive={false} />
+                </ScatterChart>
+              </ResponsiveContainer>
+            </div>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 12, color: '#8b94a6', marginBottom: 6, fontWeight: 600 }}>Error por punto (real − modelo)</div>
+              <ResponsiveContainer width="100%" height={220}>
+                <ScatterChart margin={{ top: 8, right: 12, left: -6, bottom: 4 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#272d37" strokeOpacity={0.5} />
+                  <XAxis type="number" dataKey="x" name="Velocidad" domain={['dataMin', 'dataMax']} tick={{ fontSize: 9, fill: '#8b94a6' }} tickFormatter={v => v?.toFixed(0)} unit=" m/s" />
+                  <YAxis type="number" dataKey="error_range" name="Error" tick={{ fontSize: 9, fill: '#8b94a6' }} tickFormatter={v => v.toExponential(0)} />
+                  <ZAxis range={[16, 16]} />
+                  <ReferenceLine y={0} stroke="#ef4444" strokeDasharray="4 3" />
+                  <Tooltip contentStyle={{ background: '#161a21', border: '1px solid #272d37', borderRadius: 8, fontSize: 12 }}
+                    formatter={(v, name) => [typeof v === 'number' ? v.toExponential(2) : v, name]}
+                    labelFormatter={() => ''} />
+                  <Scatter data={wFdp} fill="#f59e0b" fillOpacity={0.6} isAnimationActive={false} />
+                </ScatterChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+
           <div style={{ display: 'flex', gap: 16, marginTop: 12, flexWrap: 'wrap' }}>
             <StatBox label="R²"      value={wStats.r2?.toFixed(4) ?? '—'} color="#22c55e" />
             <StatBox label="EMC"     value={wStats.mse?.toExponential(2) ?? '—'} color={wStats.quality?.mse_ok ? '#22c55e' : '#ef4444'} />
@@ -1783,6 +1821,22 @@ function PsychrometricChartSVG({ scatter, isoRh, humectCurve, tMin, tMax, width,
 
     const plot = g.append('g').attr('clip-path', 'url(#psy-clip)')
 
+    // Corte en la saturación: el mapa de densidad no puede dibujarse por
+    // encima de la curva de HR=100 % (físicamente imposible). Se recorta con
+    // el área bajo la curva de saturación.
+    const satCurve = (isoRh ?? []).find(c => c.rh === 100)
+    let densLayer = plot
+    if (satCurve?.points?.length) {
+      const satArea = d3.area()
+        .defined(p => p.habs != null)
+        .x(p => xScale(p.T))
+        .y0(ph)
+        .y1(p => yScale(p.habs))
+      defs.append('clipPath').attr('id', 'psy-sat-clip')
+        .append('path').attr('d', satArea(satCurve.points))
+      densLayer = plot.append('g').attr('clip-path', 'url(#psy-sat-clip)')
+    }
+
     // Mapa de densidad de los estados observados (reemplaza el scatter de puntos).
     // Se dibuja primero, debajo de las curvas, para no taparlas.
     const densityData = (scatter ?? []).filter(d => d.habs != null)
@@ -1796,7 +1850,7 @@ function PsychrometricChartSVG({ scatter, isoRh, humectCurve, tMin, tMax, width,
       const maxDensity = d3.max(contours, c => c.value) || 1
       const colorScale = d3.scaleSequential(d3.interpolateViridis).domain([0, maxDensity])
 
-      plot.append('g')
+      densLayer.append('g')
         .selectAll('path.psy-density')
         .data(contours)
         .join('path')
@@ -1806,7 +1860,7 @@ function PsychrometricChartSVG({ scatter, isoRh, humectCurve, tMin, tMax, width,
         .attr('stroke', 'none')
 
       // Isolíneas de densidad para resaltar los picos
-      plot.append('g')
+      densLayer.append('g')
         .selectAll('path.psy-density-line')
         .data(contours.filter((_, i) => i % 3 === 0))
         .join('path')
@@ -2482,7 +2536,7 @@ function useSvgWidth(initial = 700) {
   return [ref, w]
 }
 
-function WindRoseSVG({ sectors, valueKey = 'pct', stacked = false, fill = 'var(--accent)', size = 300 }) {
+function WindRoseSVG({ sectors, valueKey = 'pct', stacked = false, fill = 'var(--accent)', binColors = SPEED_BIN_COLORS, binLabels = [], size = 300 }) {
   const ref = useRef(null)
   useEffect(() => {
     if (!ref.current || !sectors?.length) return
@@ -2522,8 +2576,10 @@ function WindRoseSVG({ sectors, valueKey = 'pct', stacked = false, fill = 'var(-
           const path = arc({ innerRadius: rScale(acc), outerRadius: rScale(acc + cnt), startAngle: a0, endAngle: a1 })
           acc += cnt
           g.append('path').attr('d', path)
-            .attr('fill', SPEED_BIN_COLORS[bi % SPEED_BIN_COLORS.length])
+            .attr('fill', binColors[bi % binColors.length])
             .attr('opacity', 0.92).attr('stroke', '#0f1217').attr('stroke-width', 0.4)
+            .append('title')
+            .text(`${s.label}${binLabels[bi] ? ` · ${binLabels[bi]} m/s` : ''}: ${cnt.toLocaleString()}`)
         })
       } else {
         const v = s[valueKey] || 0
@@ -2549,7 +2605,7 @@ function WindRoseSVG({ sectors, valueKey = 'pct', stacked = false, fill = 'var(-
         .attr('text-anchor', 'middle').attr('dominant-baseline', 'middle')
         .text(lbl)
     })
-  }, [sectors, valueKey, stacked, fill, size])
+  }, [sectors, valueKey, stacked, fill, binColors, binLabels, size])
   return <svg ref={ref} width={size} height={size} style={{ display: 'block', margin: '0 auto' }} />
 }
 
@@ -2636,6 +2692,12 @@ function SectionWindRose({ mode, stationId, dateFrom, dateTo }) {
   if (error)   return <Err msg={error} />
   if (!rose)   return null
 
+  // Bandas de 1 m/s compartidas por las rosas por viento, con la rampa
+  // amarillo (lento) → púrpura (rápido) del artículo (plasma invertida)
+  const wbBinLabels = rose.wind_speed_bins ?? []
+  const wbBinColors = wbBinLabels.map((_, i) =>
+    d3.interpolatePlasma(wbBinLabels.length > 1 ? 0.95 - 0.9 * i / (wbBinLabels.length - 1) : 0.5))
+
   return (
     <div ref={containerRef} style={{ width: '100%' }}>
       {mode === 'general' && rose.general && (
@@ -2659,7 +2721,7 @@ function SectionWindRose({ mode, stationId, dateFrom, dateTo }) {
         rose.by_wind?.length > 0 ? (
           <SectionCard
             title="Rosa de los vientos — por cada viento (v máx ± σ)"
-            subtitle="Distribución direccional de los registros cercanos al máximo de cada curva Weibull"
+            subtitle="Distribución direccional por banda de velocidad de los registros cercanos al máximo de cada curva Weibull"
           >
             <div style={{ display: 'grid', gridTemplateColumns: `repeat(auto-fit, minmax(${Math.min(280, svgW)}px, 1fr))`, gap: 16 }}>
               {rose.by_wind.map((wnd, i) => (
@@ -2668,8 +2730,16 @@ function SectionWindRose({ mode, stationId, dateFrom, dateTo }) {
                     Viento {wnd.comp} · {wnd.vmax?.toFixed(2)} m/s
                   </div>
                   <div style={{ fontSize: 11, color: '#5b6577', marginBottom: 4 }}>{wnd.n?.toLocaleString()} registros</div>
-                  <WindRoseSVG sectors={wnd.sectors} valueKey="pct" fill={WB_COLORS[i % WB_COLORS.length]} size={Math.min(280, svgW - 20)} />
+                  <WindRoseSVG sectors={wnd.sectors} stacked binColors={wbBinColors} binLabels={wbBinLabels} size={Math.min(280, svgW - 20)} />
                 </div>
+              ))}
+            </div>
+            <div style={{ display: 'flex', gap: 12, justifyContent: 'center', flexWrap: 'wrap', marginTop: 12, fontSize: 11 }}>
+              {wbBinLabels.map((lb, i) => (
+                <span key={lb} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                  <span style={{ width: 12, height: 12, borderRadius: 2, background: wbBinColors[i] }} />
+                  <span style={{ color: '#8b94a6' }}>{lb} m/s</span>
+                </span>
               ))}
             </div>
           </SectionCard>

@@ -1012,7 +1012,18 @@ def get_wind_rose(
         })
 
     comps = _load_weibull_components(db, station_id)
+
+    # Bandas compartidas de 1 m/s para las rosas por viento (Fig. 7 del
+    # artículo): una sola leyenda de velocidades para las tres rosas.
     by_wind = []
+    wb_edges: list[int] = []
+    wind_speed_bins: list[str] = []
+    if comps:
+        hi  = max(float(c.get("vmax") or 0) + float(c.get("sigma") or 0) for c in comps)
+        top = max(int(np.ceil(hi)), 1)
+        wb_edges        = list(range(0, top + 1))
+        wind_speed_bins = [f"{a}–{a + 1}" for a in wb_edges[:-1]]
+
     for k, c in enumerate(comps):
         vmax = c.get("vmax")
         sig  = c.get("sigma") or 0.0
@@ -1020,25 +1031,35 @@ def get_wind_rose(
             continue
         sub = m[(m["speed"] >= vmax - sig) & (m["speed"] <= vmax + sig)]
         nn  = len(sub)
+        sectors_out = []
+        for s in range(16):
+            sec_speeds = sub.loc[sub["sector"] == s, "speed"]
+            cnt = int(len(sec_speeds))
+            bins_counts, _ = np.histogram(sec_speeds, bins=wb_edges)
+            sectors_out.append({
+                "sector":  s,
+                "label":   DIR16_LABELS[s],
+                "dir_deg": round(s * 22.5, 1),
+                "count":   cnt,
+                "pct":     round(cnt / nn * 100, 2) if nn else 0.0,
+                "bins":    [int(x) for x in bins_counts],
+            })
         by_wind.append({
-            "comp":  k + 1,
-            "vmax":  vmax,
-            "sigma": c.get("sigma"),
-            "w":     c.get("w"),
-            "n":     int(nn),
-            "sectors": [
-                {
-                    "sector":  s,
-                    "label":   DIR16_LABELS[s],
-                    "dir_deg": round(s * 22.5, 1),
-                    "count":   int((sub["sector"] == s).sum()),
-                    "pct":     round(int((sub["sector"] == s).sum()) / nn * 100, 2) if nn else 0.0,
-                }
-                for s in range(16)
-            ],
+            "comp":    k + 1,
+            "vmax":    vmax,
+            "sigma":   c.get("sigma"),
+            "w":       c.get("w"),
+            "n":       int(nn),
+            "sectors": sectors_out,
         })
 
-    return {"n": n, "speed_bins": speed_labels, "general": general, "by_wind": by_wind}
+    return {
+        "n":               n,
+        "speed_bins":      speed_labels,
+        "wind_speed_bins": wind_speed_bins,
+        "general":         general,
+        "by_wind":         by_wind,
+    }
 
 
 @router.get("/wind-directional")
